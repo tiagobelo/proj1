@@ -113,14 +113,20 @@ def match_score(amazon_title: str, ml_title: str) -> float:
     return len(a & b) / min(len(a), len(b))
 
 
+class AuthRequiredError(RuntimeError):
+    """A API do Mercado Livre exige um token de acesso para esta busca."""
+
+
 def search_mercadolivre(query: str, token: str | None, limit: int = 50) -> list[dict]:
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     params = {"q": query, "limit": limit}
     resp = requests.get(ML_SEARCH_URL, params=params, headers=headers, timeout=15)
-    if resp.status_code == 401:
-        raise RuntimeError(
-            "Mercado Livre respondeu 401 (não autorizado). Configure a variável de "
-            "ambiente ML_ACCESS_TOKEN com um token de aplicativo (veja README.md)."
+    if resp.status_code in (401, 403):
+        raise AuthRequiredError(
+            f"Mercado Livre respondeu {resp.status_code} — a busca pública exige "
+            "autenticação. Configure a variável de ambiente ML_ACCESS_TOKEN com um "
+            "token de aplicativo (veja README.md, seção 'Autenticação na API do "
+            "Mercado Livre')."
         )
     resp.raise_for_status()
     return resp.json().get("results", [])
@@ -178,6 +184,8 @@ def compare_product(
 
     try:
         results = search_mercadolivre(query, token)
+    except AuthRequiredError:
+        raise
     except Exception as exc:
         print(f"  Erro na busca: {exc}")
         results = []
@@ -241,21 +249,29 @@ def main() -> None:
     if not token:
         print("Aviso: ML_ACCESS_TOKEN não configurado; tentando buscar sem autenticação.\n")
 
+    try:
+        search_mercadolivre("teste", token, limit=1)
+    except AuthRequiredError as exc:
+        raise SystemExit(f"\n{exc}") from None
+
     with open(args.input_csv, encoding="utf-8-sig") as f:
         amazon_products = list(csv.DictReader(f))
 
-    rows = [
-        compare_product(
-            product["asin"],
-            product["title"],
-            product.get("price", ""),
-            product["url"],
-            token,
-            args.min_score,
-            args.delay,
-        )
-        for product in amazon_products
-    ]
+    rows = []
+    for product in amazon_products:
+        try:
+            row = compare_product(
+                product["asin"],
+                product["title"],
+                product.get("price", ""),
+                product["url"],
+                token,
+                args.min_score,
+                args.delay,
+            )
+        except AuthRequiredError as exc:
+            raise SystemExit(f"\n{exc}") from None
+        rows.append(row)
 
     with open(args.output, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=OUTPUT_FIELDNAMES)

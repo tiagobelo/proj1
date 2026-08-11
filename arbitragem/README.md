@@ -125,10 +125,13 @@ descontar comissão, frete ou impostos.
 
 ### Autenticação na API do Mercado Livre
 
-O script tenta primeiro **sem token**, já que a busca pública
-(`/sites/MLB/search`) costuma funcionar assim. Se a API responder `401`,
-crie um app gratuito (não exige aprovação, ao contrário da Amazon
-Associates):
+**Confirmado na prática: a busca (`/sites/MLB/search`) exige token — sem
+`ML_ACCESS_TOKEN` a API responde `403 Forbidden`.** O script faz uma
+verificação antes de processar o CSV inteiro e já para com a mensagem
+abaixo se faltar autenticação, em vez de repetir o erro produto a produto.
+
+Para gerar o token, crie um app gratuito (não exige aprovação, ao
+contrário da Amazon Associates):
 
 1. Acesse https://developers.mercadolivre.com.br/devcenter e crie uma
    aplicação (`client_id`, `client_secret`, qualquer `Redirect URI` válida
