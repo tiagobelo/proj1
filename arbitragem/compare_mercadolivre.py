@@ -76,7 +76,7 @@ STOPWORDS = {
 # unidades" seria descartado por engano.
 ACCESSORY_MARKERS = {
     "capa", "capinha", "pelicula", "case", "suporte", "adaptador",
-    "carregador", "cabo", "skin", "adesivo", "protetor", "bolsa",
+    "carregador", "cabo", "skin", "adesivo", "protetor", "bolsa", "stand",
     "compativel", "compatible", "peca", "reposicao", "acessorio", "kit",
 }
 
@@ -116,6 +116,26 @@ MODEL_NUMBER_RE = re.compile(
     r"\b(iphone|ipad|galaxy|watch|redmi|echo|fire\s*tv|playstation|ps|xbox)\s+(\d{1,3})\b",
     re.IGNORECASE,
 )
+
+# Códigos de modelo alfanuméricos (ex.: "a57", "s21", "ip68") — formato
+# letra(s)+dígitos, com sufixo opcional de letras. Quando o título da
+# Amazon tem pelo menos um código desse formato e o do Mercado Livre
+# também, mas nenhum código é igual entre os dois, é bem provável que
+# sejam modelos diferentes da mesma marca — problema real encontrado
+# comparando um Galaxy A57 com anúncios de Galaxy A06, S21, S23, A37,
+# A56, A73 e até um Z Flip4 (todos "Samsung Galaxy", mas produtos bem
+# diferentes), que passavam no score de palavras sem esse filtro. Exige
+# sobreposição parcial (não igualdade total) para não rejeitar um match
+# correto só porque um dos títulos omite um código secundário (ex.: só a
+# Amazon menciona o "IP68").
+MODEL_CODE_TOKEN_RE = re.compile(r"^[a-z]{1,6}\d{1,3}[a-z]{0,3}$")
+
+# Capacidade de armazenamento em GB, ignorando menções a RAM (ex.: "8GB
+# RAM" não conta, mas "128GB"/"256GB" contam). Usado para não confundir
+# variações de armazenamento do mesmo modelo (ex.: Galaxy A57 128GB vs
+# Galaxy A57 256GB), que têm preços bem diferentes apesar de "a57"
+# aparecer nos dois títulos.
+STORAGE_RE = re.compile(r"\b(\d{2,4})\s*gb\b(?!\s*(?:de\s+)?ram)", re.IGNORECASE)
 
 OUTPUT_FIELDNAMES = [
     "asin",
@@ -241,6 +261,41 @@ def has_model_number_mismatch(amazon_title: str, ml_title: str) -> bool:
     return amazon_model[0] == ml_model[0] and amazon_model[1] != ml_model[1]
 
 
+def extract_model_codes(words: set[str]) -> set[str]:
+    return {w for w in words if MODEL_CODE_TOKEN_RE.match(w)}
+
+
+def has_model_code_mismatch(amazon_words: set[str], ml_words: set[str]) -> bool:
+    """Quando os dois títulos têm pelo menos um código de modelo (ex.:
+    "a57", "ip68") mas nenhum deles é igual, provavelmente são produtos
+    diferentes — mesmo que outras palavras (marca, "5g", "câmera") se
+    sobreponham o bastante para um score alto. Basta UMA coincidência
+    (ex.: "a57" em comum) para não rejeitar, já que um anúncio pode
+    omitir um código secundário sem deixar de ser o mesmo produto."""
+    amazon_codes = extract_model_codes(amazon_words)
+    ml_codes = extract_model_codes(ml_words)
+    if not amazon_codes or not ml_codes:
+        return False
+    return amazon_codes.isdisjoint(ml_codes)
+
+
+def extract_storage_options(title: str) -> set[int]:
+    return {int(m) for m in STORAGE_RE.findall(title)}
+
+
+def has_storage_mismatch(amazon_title: str, ml_title: str) -> bool:
+    """Mesma lógica de tolerância do filtro de código de modelo: só
+    rejeita quando NENHUMA capacidade mencionada coincide entre os dois
+    títulos. Problema real encontrado: um Galaxy A57 128GB (Amazon)
+    batendo com um Galaxy A57 256GB (Mercado Livre) — mesmo modelo, preço
+    bem diferente."""
+    amazon_storage = extract_storage_options(amazon_title)
+    ml_storage = extract_storage_options(ml_title)
+    if not amazon_storage or not ml_storage:
+        return False
+    return amazon_storage.isdisjoint(ml_storage)
+
+
 def parse_price_value(value) -> float | None:
     """A GeckoAPI pode retornar o preço como número puro, string
     formatada ('149,90' ou '149.90') ou um objeto aninhado
@@ -359,6 +414,10 @@ def filter_and_score(amazon_title: str, results: list[dict], min_score: float) -
         if has_battery_size_mismatch(amazon_title, ml_title):
             continue
         if has_model_number_mismatch(amazon_title, ml_title):
+            continue
+        if has_model_code_mismatch(amazon_words, ml_words):
+            continue
+        if has_storage_mismatch(amazon_title, ml_title):
             continue
         score = match_score(amazon_title, ml_title)
         if score < min_score:

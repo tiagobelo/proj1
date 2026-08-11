@@ -141,18 +141,20 @@ nomes de campo em `parse_item()`.
 
 A página de "Mais vendidos" da Amazon não expõe marca/modelo/EAN de forma
 estruturada, então usamos o nível 3 do plano de identificação em camadas
-(título normalizado), com cinco filtros para reduzir falsos positivos:
+(título normalizado), com sete filtros para reduzir falsos positivos:
 
 1. **Score de similaridade**: sobreposição de palavras significativas entre
    o título da Amazon e o do anúncio do Mercado Livre (`--min-score`,
    padrão `0.5`).
 2. **Filtro de acessório**: descarta anúncios que contenham palavras como
-   `capinha`, `case`, `suporte`, `kit`, `carregador` etc. quando essas
-   palavras não aparecem também no título da Amazon — sem isso, uma
+   `capinha`, `case`, `suporte`, `stand`, `kit`, `carregador` etc. quando
+   essas palavras não aparecem também no título da Amazon — sem isso, uma
    "Capinha para Echo Dot" pode pontuar alto no score e ser confundida com
-   o produto em si. Exceção: "kit" sozinho não desqualifica quando os dois
-   títulos confirmam a mesma quantidade (ver item 3) — senão um multipack
-   genuíno descrito como "Kit com 16 unidades" seria descartado à toa.
+   o produto em si (problema real: um "Stand" — base/suporte — para Echo
+   Dot estava definindo o preço mínimo errado num teste). Exceção: "kit"
+   sozinho não desqualifica quando os dois títulos confirmam a mesma
+   quantidade (ver item 3) — senão um multipack genuíno descrito como
+   "Kit com 16 unidades" seria descartado à toa.
 3. **Filtro de quantidade**: quando os dois títulos mencionam
    explicitamente uma quantidade de itens (ex.: "16 unidades", ou a
    abreviação "C/4"), anúncios com quantidade diferente são descartados
@@ -174,9 +176,30 @@ estruturada, então usamos o nível 3 do plano de identificação em camadas
    descarta o anúncio se o número de geração for diferente — problema real
    encontrado comparando um "iPhone 17" da Amazon com um "iPhone 15" do
    Mercado Livre, que pontuava alto porque as demais palavras do título
-   (marca, capacidade, cor) eram idênticas. Não interfere em casos como
-   "Galaxy A57"/"Echo Dot 5a" porque o número vem colado a uma letra
-   ("a57", "5a"), que já é diferenciado normalmente pelo score de palavras.
+   (marca, capacidade, cor) eram idênticas.
+6. **Filtro de código de modelo alfanumérico**: quando os dois títulos têm
+   pelo menos um token no formato "letra(s)+dígitos" (ex.: "a57", "s21",
+   "p30i", "ip68") mas nenhum deles coincide, o anúncio é descartado —
+   basta uma coincidência para não rejeitar (um anúncio pode omitir um
+   código secundário, tipo o "IP68", sem deixar de ser o mesmo produto).
+   Esse foi o achado mais sério até agora: um "Galaxy A57" da Amazon
+   estava sendo comparado com anúncios de Galaxy A06, S21, S23, A37, A56,
+   A73 e até um Z Flip4 (todos "Samsung Galaxy", mas produtos totalmente
+   diferentes) porque o score de palavras genérico (marca, "5G", "câmera",
+   "RAM") não bastava para descartá-los. De quebra, o mesmo filtro também
+   passou a descartar variações de modelo de fones (ex.: Soundcore P20i,
+   P31i, P40i, R50i comparados com o P30i correto) sem nenhum código
+   específico para isso.
+7. **Filtro de capacidade de armazenamento**: quando os dois títulos
+   mencionam GB de armazenamento (ignorando menções a "RAM") mas nenhuma
+   capacidade coincide, o anúncio é descartado — pega o caso de um mesmo
+   modelo em capacidades diferentes (ex.: Galaxy A57 128GB da Amazon
+   batendo com um Galaxy A57 256GB no Mercado Livre, que o filtro de
+   código de modelo sozinho não rejeitaria, já que "a57" aparece nos dois).
+
+Nenhum desses filtros (3 a 7) interfere em casos como "Galaxy A57"/"Echo
+Dot 5a" quando o número vem colado a uma letra sem indicar um produto
+diferente — o score de palavras já resolve esses casos sozinho.
 
 Além disso, só considera anúncios com `condition == "new"` (produto novo,
 já que o objetivo é revenda) e remove outliers de preço pela regra do IQR
