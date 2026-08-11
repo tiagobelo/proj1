@@ -80,6 +80,26 @@ ACCESSORY_MARKERS = {
     "compativel", "compatible", "peca", "reposicao", "acessorio", "kit",
 }
 
+# Marcas comuns nas categorias testadas até agora. Quando os dois títulos
+# mencionam alguma marca reconhecida mas nenhuma coincide, o anúncio é
+# descartado — problema real: "Duracell Pilhas Alcalinas AA Pack 24
+# Unidades" batendo com "24 Pilhas Alcalinas Panasonic Premium Aa", marca
+# completamente diferente, mas as demais palavras (pilhas, alcalinas, aa,
+# 24, pequena) eram suficientes para passar no score.
+KNOWN_BRANDS = {
+    "elgin", "duracell", "panasonic", "energizer", "samsung", "apple",
+    "amazon", "anker", "sony", "jbl", "xiaomi", "motorola", "lg",
+}
+
+# Nomes de linha de produto que, dentro da mesma marca, identificam um
+# produto diferente do testado (ex.: fones "Soundcore Liberty"/"Soundcore
+# Space" não são o "Soundcore P30i"). Diferente do filtro de código de
+# modelo (que pega "p30i" vs "q30", ambos no formato letra+dígito), esses
+# nomes vêm como palavra solta antes de um número separado ("Liberty 4
+# Pro", "Space 2"), então não são capturados por aquele filtro — problema
+# real: essas duas linhas inflando a média do Soundcore P30i em +144%.
+DIFFERENT_LINE_MARKERS = {"liberty", "space"}
+
 PRICE_RE = re.compile(r"[\d.,]+")
 
 # Detecta menção explícita a quantidade de itens no pacote (ex.: "16
@@ -89,7 +109,7 @@ PRICE_RE = re.compile(r"[\d.,]+")
 # porque as demais palavras do título são idênticas.
 QUANTITY_RE = re.compile(
     r"(?:kit\s*(?:com|de)?\s*|pack\s*(?:com|de)?\s*|com\s*)?"
-    r"(\d+)\s*(?:unidades|unidade|unid\.?|uni\.?|un\.?|pe(?:c|ç)as?|pcs?\.?)\b",
+    r"(\d+)\s*(?:unidades|unidade|unid\.?|uni\.?|un\.?|pe(?:c|ç)as?|pcs?\.?|pilhas?|baterias?)\b",
     re.IGNORECASE,
 )
 # Abreviação comum no Mercado Livre para quantidade, sem a palavra
@@ -233,6 +253,18 @@ def looks_like_accessory(amazon_title: str, ml_title: str, amazon_words: set[str
         if amazon_qty is not None and ml_qty is not None and amazon_qty == ml_qty:
             return False
     return True
+
+
+def looks_like_different_line(amazon_words: set[str], ml_words: set[str]) -> bool:
+    return bool((ml_words & DIFFERENT_LINE_MARKERS) - amazon_words)
+
+
+def has_brand_mismatch(amazon_words: set[str], ml_words: set[str]) -> bool:
+    amazon_brands = amazon_words & KNOWN_BRANDS
+    ml_brands = ml_words & KNOWN_BRANDS
+    if not amazon_brands or not ml_brands:
+        return False
+    return amazon_brands.isdisjoint(ml_brands)
 
 
 def has_quantity_mismatch(amazon_title: str, ml_title: str) -> bool:
@@ -408,6 +440,10 @@ def filter_and_score(amazon_title: str, results: list[dict], min_score: float) -
         ml_title = item.get("title", "")
         ml_words = normalize(ml_title)
         if looks_like_accessory(amazon_title, ml_title, amazon_words, ml_words):
+            continue
+        if looks_like_different_line(amazon_words, ml_words):
+            continue
+        if has_brand_mismatch(amazon_words, ml_words):
             continue
         if has_quantity_mismatch(amazon_title, ml_title):
             continue

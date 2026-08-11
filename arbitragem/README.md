@@ -141,7 +141,8 @@ nomes de campo em `parse_item()`.
 
 A página de "Mais vendidos" da Amazon não expõe marca/modelo/EAN de forma
 estruturada, então usamos o nível 3 do plano de identificação em camadas
-(título normalizado), com sete filtros para reduzir falsos positivos:
+(título normalizado), com nove filtros de matching para reduzir falsos
+positivos:
 
 1. **Score de similaridade**: sobreposição de palavras significativas entre
    o título da Amazon e o do anúncio do Mercado Livre (`--min-score`,
@@ -156,15 +157,17 @@ estruturada, então usamos o nível 3 do plano de identificação em camadas
    quantidade (ver item 3) — senão um multipack genuíno descrito como
    "Kit com 16 unidades" seria descartado à toa.
 3. **Filtro de quantidade**: quando os dois títulos mencionam
-   explicitamente uma quantidade de itens (ex.: "16 unidades", ou a
-   abreviação "C/4"), anúncios com quantidade diferente são descartados
-   mesmo com score alto. Sem isso, um pacote de 4 pilhas e um de 16 pilhas
-   do mesmo fabricante têm score de similaridade ~1.0 (só a palavra da
-   quantidade muda) e seriam tratados como o mesmo produto — problema real
-   encontrado em teste com dados reais. Quando nenhum dos dois títulos
-   menciona quantidade (nem a forma longa nem a abreviada), o filtro não
-   se aplica — limitação conhecida, não dá pra confirmar quantidade nesse
-   caso.
+   explicitamente uma quantidade de itens (ex.: "16 unidades", a
+   abreviação "C/4", ou o formato "N Pilhas"/"N Baterias"), anúncios com
+   quantidade diferente são descartados mesmo com score alto. Sem isso, um
+   pacote de 4 pilhas e um de 16 pilhas do mesmo fabricante têm score de
+   similaridade ~1.0 (só a palavra da quantidade muda) e seriam tratados
+   como o mesmo produto — problema real encontrado em teste com dados
+   reais, inclusive títulos como "16 Pilhas ... 4 Cartelas" que só o
+   padrão "N Pilhas" pega (nem "unidades" nem "C/4" aparecem nesse
+   formato). Quando nenhum dos dois títulos menciona quantidade em algum
+   desses formatos, o filtro não se aplica — limitação conhecida, não dá
+   pra confirmar quantidade nesse caso.
 4. **Filtro de tamanho de pilha**: "AA" e "AAA" são produtos diferentes,
    mas "AA" tem só 2 caracteres e o score de palavras normalmente descarta
    palavras tão curtas — na prática, o matching nunca soube diferenciar
@@ -196,8 +199,29 @@ estruturada, então usamos o nível 3 do plano de identificação em camadas
    modelo em capacidades diferentes (ex.: Galaxy A57 128GB da Amazon
    batendo com um Galaxy A57 256GB no Mercado Livre, que o filtro de
    código de modelo sozinho não rejeitaria, já que "a57" aparece nos dois).
+8. **Filtro de marca**: lista pequena de marcas conhecidas nas categorias
+   já testadas (`elgin`, `duracell`, `panasonic`, `samsung`, `apple`,
+   `anker` etc. — ver `KNOWN_BRANDS`). Quando os dois títulos mencionam
+   alguma marca reconhecida mas nenhuma coincide, descarta — problema
+   real: "Duracell Pilhas Alcalinas AA Pack 24 Unidades" batendo com "24
+   Pilhas Alcalinas **Panasonic** Premium Aa", marca totalmente diferente,
+   mas as demais palavras (pilhas, alcalinas, aa, 24, pequena) bastavam
+   para passar no score.
+9. **Filtro de linha de produto diferente**: lista pequena de nomes que
+   identificam um produto diferente dentro da mesma marca quando aparecem
+   como palavra solta antes de um número separado, formato que o filtro
+   de código alfanumérico (item 6) não cobre (ex.: "Liberty 4 Pro", não
+   "liberty4pro"). Problema real: fones "Soundcore Liberty 4 Pro" e
+   "Soundcore Space 2/One" inflando a média do "Soundcore P30i" em até
+   +144% — a lista atual só tem `liberty`/`space` (ver
+   `DIFFERENT_LINE_MARKERS`), cresce sob demanda conforme aparecerem
+   novos casos.
+Os filtros 8 e 9 usam listas pequenas e específicas às categorias já
+testadas (baterias, celulares Samsung/Apple, fones Anker) — ao testar
+categorias novas, é esperado precisar adicionar marcas/linhas de produto
+novas conforme problemas parecidos aparecerem.
 
-Nenhum desses filtros (3 a 7) interfere em casos como "Galaxy A57"/"Echo
+Nenhum desses filtros (3 a 9) interfere em casos como "Galaxy A57"/"Echo
 Dot 5a" quando o número vem colado a uma letra sem indicar um produto
 diferente — o score de palavras já resolve esses casos sozinho.
 
