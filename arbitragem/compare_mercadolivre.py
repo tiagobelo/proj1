@@ -1,62 +1,63 @@
 """
 MVP-02: para cada produto de um CSV gerado por scrape_to_csv.py, busca no
-Mercado Livre (site MLB — Brasil) os anúncios correspondentes e calcula
-preço mínimo/médio/máximo. Ainda não calcula lucro/ROI (isso é o MVP-03) —
-o objetivo aqui é só validar se conseguimos encontrar o "mesmo produto" com
-confiança razoável.
+Mercado Livre via GeckoAPI (serviço de extração de dados de terceiros,
+https://geckoapi.com.br) e calcula preço mínimo/médio/máximo dos anúncios
+compatíveis. Ainda não calcula lucro/ROI (isso é o MVP-03).
 
-A API pública de busca (/sites/MLB/search) está fechada para apps comuns
-de desenvolvedor: mesmo com um access_token válido, ela responde
-403 {"message":"forbidden"} — problema confirmado em teste real e
-relatado por diversos desenvolvedores desde ago/2025, sem solução oficial
-do Mercado Livre até hoje. Por isso, assim como fizemos com a Amazon,
-este script busca fazendo scraping da página pública de resultados —
-não precisa mais de client_id, client_secret nem access_token.
+Histórico (por que não é chamada direta ao Mercado Livre):
+- A API oficial de busca (/sites/MLB/search) responde 403 "forbidden"
+  mesmo com access_token válido — problema generalizado, relatado por
+  vários desenvolvedores desde ago/2025, sem solução oficial até hoje.
+- Scraping direto via Playwright esbarrou na triagem antibot do Mercado
+  Livre, que redireciona sessões "sem histórico" para uma tela de login
+  (/gz/account-verification) antes de mostrar a busca.
+A GeckoAPI terceiriza essa extração para um provedor especializado nisso,
+então este script não faz mais scraping nem chama a API oficial do
+Mercado Livre diretamente.
 
-O Mercado Livre também aplica uma triagem antibot que pode redirecionar
-sessões "sem histórico" (cookies zerados, indo direto para um link
-profundo) para uma tela de verificação de conta. Para reduzir a chance
-disso acontecer, o script usa um perfil de navegador persistente (cookies
-salvos entre execuções, em .ml_browser_profile/) e visita a página
-inicial antes de ir para a busca, imitando uma navegação mais natural.
-Isso não é garantia — se o Mercado Livre insistir em pedir login mesmo
-assim, não há solução sem autenticar com uma conta de verdade, o que traz
-risco real de restrição na conta e exige uma decisão separada.
+Configuração:
+    1. Crie uma conta gratuita em https://dashboard.geckoapi.com.br
+       (tem cota de créditos grátis para testar, sem cartão).
+    2. Gere um token de API no dashboard.
+    3. Exporte a variável de ambiente antes de rodar (nunca coloque o
+       token direto no código):
+           export GECKOAPI_TOKEN="seu_token"   # bash/WSL
+           $env:GECKOAPI_TOKEN="seu_token"     # PowerShell
 
-Como a página de "Mais vendidos" da Amazon não expõe marca/modelo/EAN de
-forma estruturada, o matching usado aqui é por título normalizado (nível 3
-do plano de identificação em camadas): compara o conjunto de palavras
-significativas do título da Amazon com o de cada resultado do Mercado
-Livre e descarta os que têm pouca sobreposição, além de descartar
-anúncios que parecem ser acessórios/kits em vez do produto em si.
+Cada produto do CSV consome créditos da sua conta GeckoAPI (uma chamada
+por busca) — use --max-products para testar com poucos itens antes de
+rodar o CSV inteiro.
 
-Dependência: playwright (mesma já usada em scrape_to_csv.py)
-    pip install playwright
-    playwright install chromium
+Aviso sobre o schema de resposta: não tive acesso à documentação
+completa da GeckoAPI ao escrever este script, então a extração dos
+campos (título, preço, condição) usa múltiplos nomes de campo prováveis
+como fallback. Na primeira busca, a resposta bruta da API é salva em
+geckoapi_debug_sample.json — se os resultados vierem estranhos, veja
+esse arquivo para ajustar os nomes de campo em parse_item().
+
+Dependência: requests (pip install requests)
 
 Uso:
     python compare_mercadolivre.py produtos.csv
-    python compare_mercadolivre.py produtos.csv --output comparacao.csv
-    python compare_mercadolivre.py produtos.csv --min-score 0.6 --delay 1.5
-    python compare_mercadolivre.py produtos.csv --headed
+    python compare_mercadolivre.py produtos.csv --max-products 3
+    python compare_mercadolivre.py produtos.csv --output comparacao.csv --min-score 0.6
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import json
+import os
 import re
 import statistics
 import time
 import unicodedata
-from pathlib import Path
-from urllib.parse import quote
 
-from playwright.sync_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
+import requests
 
-HOME_URL = "https://www.mercadolivre.com.br/"
-SEARCH_URL_TEMPLATE = "https://lista.mercadolivre.com.br/{query}"
-PROFILE_DIR = Path(__file__).resolve().parent / ".ml_browser_profile"
+GECKOAPI_URL = "https://api.geckoapi.com.br/v1/extract"
+DEBUG_SAMPLE_PATH = "geckoapi_debug_sample.json"
 
 STOPWORDS = {
     "de", "da", "do", "das", "dos", "com", "para", "e", "ou", "um", "uma",
@@ -75,27 +76,7 @@ ACCESSORY_MARKERS = {
     "compativel", "compatible", "peca", "reposicao", "acessorio", "kit",
 }
 
-# Seletores conhecidos dos cards de resultado. O Mercado Livre já usou (e
-# ainda mistura, dependendo da categoria/experimento) tanto a marcação
-# "ui-search-*" mais antiga quanto a mais nova "poly-*". Mantemos os dois
-# como fallback, igual fizemos com a Amazon.
-CARD_SELECTOR = "li.ui-search-layout__item, div.ui-search-result__wrapper, div.poly-card, div[class*='poly-card']"
-TITLE_SELECTOR = "h2.ui-search-item__title, .ui-search-item__title, h3.poly-component__title, a.poly-component__title, [class*='poly-component__title']"
-LINK_SELECTOR = "a.ui-search-link, a.ui-search-item__group__element, a.poly-component__title, a[href*='mercadolivre.com.br'], a[href*='/MLB-']"
-
 PRICE_RE = re.compile(r"[\d.,]+")
-PRICE_TEXT_RE = re.compile(r"R\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})?")
-
-# Sinais de que o Mercado Livre interceptou a navegação com uma triagem
-# antibot em vez de mostrar a página pedida — seja um CAPTCHA, seja a
-# tela "/gz/account-verification" pedindo login antes de continuar.
-BLOCK_MARKERS = (
-    "Confirme que você não é um robô",
-    "captcha",
-    "Acesso bloqueado",
-    "account-verification",
-    "Para continuar, acesse sua conta",
-)
 
 OUTPUT_FIELDNAMES = [
     "asin",
@@ -160,118 +141,104 @@ def looks_like_accessory(amazon_words: set[str], ml_words: set[str]) -> bool:
     return bool(extra_accessory_words)
 
 
-def parse_price_text(text: str | None) -> float | None:
-    if not text:
+def parse_price_value(value) -> float | None:
+    """A GeckoAPI pode retornar o preço como número puro, string
+    formatada ('149,90' ou '149.90') ou um objeto aninhado
+    (ex.: {'value': 149.9}) — como não confirmamos o schema exato,
+    tratamos os formatos mais prováveis."""
+    if value is None:
         return None
-    match = PRICE_RE.search(text)
-    if not match:
+    if isinstance(value, bool):
         return None
-    normalized = match.group(0).replace(".", "").replace(",", ".")
-    try:
-        return float(normalized)
-    except ValueError:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, dict):
+        for key in ("value", "amount", "current", "price"):
+            if key in value:
+                return parse_price_value(value[key])
         return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        match = PRICE_RE.search(text)
+        if not match:
+            return None
+        raw = match.group(0)
+        normalized = raw.replace(".", "").replace(",", ".") if "," in raw else raw
+        try:
+            return float(normalized)
+        except ValueError:
+            return None
+    return None
 
 
-def extract_price(card) -> float | None:
-    """O preço do Mercado Livre normalmente vem em dois spans separados
-    (parte inteira e centavos, ex.: 'andes-money-amount__fraction' = '149'
-    e 'andes-money-amount__cents' = '90'). Se essa estrutura não bater,
-    cai para uma busca por regex de 'R$ 149,90' em todo o texto do card —
-    o mesmo fallback que já usamos no scraper da Amazon."""
-    fraction_el = card.query_selector("[class*='andes-money-amount__fraction']")
-    if fraction_el:
-        cents_el = card.query_selector("[class*='andes-money-amount__cents']")
-        fraction = fraction_el.inner_text().strip()
-        cents = cents_el.inner_text().strip() if cents_el else "00"
-        price = parse_price_text(f"{fraction},{cents}")
-        if price is not None:
-            return price
-
-    match = PRICE_TEXT_RE.search(card.inner_text())
-    return parse_price_text(match.group(0)) if match else None
+def find_items(payload) -> list[dict]:
+    """Localiza a lista de anúncios dentro da resposta da API, tentando
+    as chaves de envelope mais comuns em APIs desse tipo."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("results", "items", "products", "data", "listings", "plp"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                nested = find_items(value)
+                if nested:
+                    return nested
+    return []
 
 
-def extract_condition(card) -> str:
-    """O Mercado Livre normalmente só exibe uma etiqueta explícita para
-    anúncios usados; produtos novos costumam vir sem essa marcação. É uma
-    heurística simples — pode errar em títulos que mencionem 'usado' por
-    outro motivo, mas é razoável para o MVP."""
-    text = card.inner_text().lower()
-    return "used" if "usado" in text else "new"
-
-
-def extract_item(card) -> dict | None:
-    title_el = card.query_selector(TITLE_SELECTOR)
-    link_el = card.query_selector(LINK_SELECTOR)
-    if title_el is None or link_el is None:
-        return None
-
-    title = title_el.inner_text().strip()
-    url = link_el.get_attribute("href")
+def parse_item(raw: dict) -> dict | None:
+    title = raw.get("name") or raw.get("title") or raw.get("productName")
+    url = raw.get("url") or raw.get("link") or raw.get("permalink")
     if not title or not url:
         return None
 
-    return {
-        "title": title,
-        "permalink": url,
-        "price": extract_price(card),
-        "condition": extract_condition(card),
+    price = parse_price_value(raw.get("price"))
+
+    condition_raw = str(raw.get("condition", "")).lower()
+    if condition_raw:
+        condition = "used" if "usado" in condition_raw or "used" in condition_raw else "new"
+    else:
+        condition = "used" if "usado" in title.lower() else "new"
+
+    return {"title": title, "permalink": url, "price": price, "condition": condition}
+
+
+def search_mercadolivre(
+    query: str,
+    token: str,
+    power_seller: bool | None = None,
+    save_debug: bool = False,
+) -> list[dict]:
+    body = {
+        "target": "mercadolivre.com.br",
+        "type": "plp",
+        "page": 1,
+        "keyword": query,
     }
+    if power_seller is not None:
+        body["powerSeller"] = power_seller
 
+    resp = requests.post(
+        GECKOAPI_URL,
+        headers={"Authorization": f"Bearer {token}"},
+        json=body,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
 
-class BlockedError(RuntimeError):
-    """O Mercado Livre interceptou a navegação com uma triagem antibot
-    (CAPTCHA ou tela de verificação de conta) em vez de mostrar a busca."""
+    if save_debug:
+        with open(DEBUG_SAMPLE_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        print(f"  Resposta bruta da GeckoAPI salva em {DEBUG_SAMPLE_PATH} (para conferência)")
 
-
-def warm_up(context: BrowserContext) -> Page:
-    """Visita a home antes de qualquer busca, para que a sessão pareça uma
-    navegação normal em vez de um cliente indo direto a um link profundo
-    sem nenhum histórico — um dos sinais que a triagem antibot considera."""
-    page = context.pages[0] if context.pages else context.new_page()
-    context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-    try:
-        page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30_000)
-        page.wait_for_timeout(1500)
-        for label in ("Aceitar", "Aceitar cookies", "Concordo"):
-            locator = page.get_by_text(label, exact=False)
-            if locator.count() > 0:
-                locator.first.click(timeout=3000)
-                break
-    except Exception as exc:
-        print(f"Aviso: aquecimento da sessão falhou ({exc}); seguindo mesmo assim.")
-    return page
-
-
-def check_blocked(page: Page) -> None:
-    content = page.content()
-    if any(marker.lower() in content.lower() for marker in BLOCK_MARKERS):
-        raise BlockedError(
-            f"Mercado Livre interceptou a navegação com uma triagem antibot em {page.url}"
-        )
-
-
-def search_mercadolivre(page: Page, query: str, limit: int = 50) -> list[dict]:
-    url = SEARCH_URL_TEMPLATE.format(query=quote(query.replace(" ", "-")))
-    page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-
-    check_blocked(page)
-
-    try:
-        page.wait_for_selector(CARD_SELECTOR, timeout=15_000)
-    except PlaywrightTimeoutError:
-        # Pode ser página sem resultados, ou a estrutura do site mudou.
-        return []
-
-    cards = page.query_selector_all(CARD_SELECTOR)
     results = []
-    for card in cards[:limit]:
-        try:
-            item = extract_item(card)
-        except Exception as exc:
-            print(f"  Aviso: falha ao ler um card ({exc})")
-            continue
+    for raw in find_items(payload):
+        item = parse_item(raw)
         if item:
             results.append(item)
     return results
@@ -311,22 +278,22 @@ def remove_price_outliers(prices: list[float]) -> list[float]:
 
 
 def compare_product(
-    page: Page,
     asin: str,
     amazon_title: str,
     amazon_price: str,
     amazon_url: str,
+    token: str,
     min_score: float,
     delay: float,
+    power_seller: bool | None,
+    save_debug: bool,
 ) -> dict:
     query = build_query(amazon_title)
-    print(f"Buscando no Mercado Livre: '{query}'")
+    print(f"Buscando no Mercado Livre (GeckoAPI): '{query}'")
 
     try:
-        results = search_mercadolivre(page, query)
-    except BlockedError:
-        raise
-    except Exception as exc:
+        results = search_mercadolivre(query, token, power_seller=power_seller, save_debug=save_debug)
+    except requests.exceptions.RequestException as exc:
         print(f"  Erro na busca: {exc}")
         results = []
 
@@ -378,59 +345,42 @@ def compare_product(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compara produtos da Amazon com anúncios no Mercado Livre")
+    parser = argparse.ArgumentParser(description="Compara produtos da Amazon com anúncios no Mercado Livre via GeckoAPI")
     parser.add_argument("input_csv", help="CSV gerado por scrape_to_csv.py")
     parser.add_argument("--output", default="comparacao.csv", help="Caminho do CSV de saída")
     parser.add_argument("--min-score", type=float, default=0.5, help="Score mínimo de matching (0 a 1, padrão 0.5)")
-    parser.add_argument("--delay", type=float, default=2.0, help="Segundos entre buscas (padrão 2.0)")
-    parser.add_argument("--headed", action="store_true", help="Abre o navegador visível (útil para depurar)")
+    parser.add_argument("--delay", type=float, default=1.0, help="Segundos entre buscas (padrão 1.0)")
+    parser.add_argument("--max-products", type=int, default=None, help="Processa só os N primeiros produtos do CSV (útil para testar sem gastar muitos créditos)")
+    parser.add_argument("--power-seller", action="store_true", help="Filtra só vendedores com selo PowerSeller/MercadoLíder")
     args = parser.parse_args()
+
+    token = os.getenv("GECKOAPI_TOKEN")
+    if not token:
+        raise SystemExit(
+            "Defina a variável de ambiente GECKOAPI_TOKEN com seu token da GeckoAPI "
+            "antes de rodar (veja instruções no topo de compare_mercadolivre.py ou no README.md)."
+        )
 
     with open(args.input_csv, encoding="utf-8-sig") as f:
         amazon_products = list(csv.DictReader(f))
 
-    PROFILE_DIR.mkdir(exist_ok=True)
+    if args.max_products:
+        amazon_products = amazon_products[: args.max_products]
 
-    with sync_playwright() as pw:
-        # Perfil persistente (cookies salvos entre execuções em
-        # .ml_browser_profile/) para a sessão parecer um navegador que já
-        # visitou o site antes, em vez de um cliente anônimo toda vez.
-        context = pw.chromium.launch_persistent_context(
-            str(PROFILE_DIR),
-            headless=not args.headed,
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="pt-BR",
-            timezone_id="America/Sao_Paulo",
-            viewport={"width": 1366, "height": 768},
+    rows = []
+    for i, product in enumerate(amazon_products):
+        row = compare_product(
+            product["asin"],
+            product["title"],
+            product.get("price", ""),
+            product["url"],
+            token,
+            args.min_score,
+            args.delay,
+            power_seller=True if args.power_seller else None,
+            save_debug=(i == 0),
         )
-
-        rows = []
-        try:
-            page = warm_up(context)
-            for product in amazon_products:
-                row = compare_product(
-                    page,
-                    product["asin"],
-                    product["title"],
-                    product.get("price", ""),
-                    product["url"],
-                    args.min_score,
-                    args.delay,
-                )
-                rows.append(row)
-        except BlockedError as exc:
-            raise SystemExit(
-                f"\n{exc}\n\n"
-                "O Mercado Livre pediu login antes de mostrar a busca, mesmo com "
-                "sessão aquecida. Resultados parciais (se houver) não foram salvos. "
-                "Rode de novo mais tarde, ou com --headed para ver o que está "
-                "acontecendo na tela."
-            ) from None
-        finally:
-            context.close()
+        rows.append(row)
 
     with open(args.output, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=OUTPUT_FIELDNAMES)

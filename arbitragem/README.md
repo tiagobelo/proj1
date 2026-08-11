@@ -84,19 +84,58 @@ adicionar uma categoria não exige alteração de código.
 ## MVP-02 — Comparação com o Mercado Livre
 
 [`compare_mercadolivre.py`](compare_mercadolivre.py) lê o CSV gerado pelo
-`scrape_to_csv.py`, busca cada produto no Mercado Livre (site `MLB` —
-Brasil) e calcula preço mínimo/médio/máximo dos anúncios que provavelmente
-são o mesmo produto. Ainda **não** calcula lucro/ROI — isso é o MVP-03.
+`scrape_to_csv.py`, busca cada produto no Mercado Livre e calcula preço
+mínimo/médio/máximo dos anúncios que provavelmente são o mesmo produto.
+Ainda **não** calcula lucro/ROI — isso é o MVP-03.
 
-**A busca é feita por scraping da página pública de resultados, não pela
-API.** Testamos a API oficial (`/sites/MLB/search`) e, mesmo com um
-`access_token` válido gerado via OAuth, ela responde
-`403 {"message":"forbidden"}` — o endpoint está fechado para apps comuns
-de desenvolvedor, só disponível para integradores certificados. Como isso
-é essencialmente o mesmo bloqueio que já tínhamos identificado do lado da
-Amazon (Creators API exige aprovação prévia), seguimos a mesma solução:
-scraping da página pública, sem precisar de `client_id`/`client_secret`/
-`access_token`.
+### Por que via GeckoAPI, e não a API oficial nem scraping direto
+
+Tentamos dois caminhos antes deste:
+
+1. **API oficial do Mercado Livre** (`/sites/MLB/search`): mesmo com um
+   `access_token` válido gerado via OAuth, responde
+   `403 {"message":"forbidden"}` — endpoint fechado para apps comuns de
+   desenvolvedor, problema generalizado desde ago/2025 e sem solução
+   oficial até hoje (mesmo tipo de bloqueio que a Amazon Creators API
+   impõe exigindo aprovação prévia).
+2. **Scraping direto via Playwright**: esbarrou na triagem antibot do
+   Mercado Livre, que redireciona sessões "sem histórico" para uma tela
+   de login (`/gz/account-verification`) antes de mostrar a busca.
+
+A solução atual usa a [GeckoAPI](https://geckoapi.com.br/), um provedor
+terceiro especializado em extração de dados de marketplaces (Mercado
+Livre, Shopee, Temu etc.) — eles absorvem o trabalho de lidar com
+antibot/CAPTCHA como parte do serviço, e nós só consumimos uma API
+HTTP normal.
+
+### Configuração da GeckoAPI
+
+1. Crie uma conta gratuita em https://dashboard.geckoapi.com.br (tem cota
+   de créditos grátis para testar, sem cartão).
+2. Gere um token de API no dashboard.
+3. Exporte a variável de ambiente (**nunca** coloque o token direto no
+   código ou no CSV):
+   ```bash
+   export GECKOAPI_TOKEN="seu_token"   # bash/WSL
+   ```
+   ```powershell
+   $env:GECKOAPI_TOKEN="seu_token"     # PowerShell
+   ```
+
+Cada produto do CSV consome créditos da conta — use `--max-products` para
+testar com poucos itens antes de rodar o CSV inteiro.
+
+### Aviso sobre o schema de resposta da API
+
+Não tivemos acesso à documentação completa da GeckoAPI (bloqueada no
+ambiente onde este código foi escrito), então `parse_item()` em
+`compare_mercadolivre.py` tenta múltiplos nomes de campo prováveis como
+fallback (`name`/`title`, `url`/`link`/`permalink`, preço como número,
+string ou objeto aninhado). Na primeira busca de cada execução, a
+resposta bruta da API é salva em `geckoapi_debug_sample.json`
+(git-ignorado) — se os resultados vierem estranhos (título vazio, preço
+sempre em branco), esse arquivo mostra o formato real e é só ajustar os
+nomes de campo em `parse_item()`.
 
 ### Como funciona o matching
 
@@ -120,12 +159,13 @@ antes de calcular a média.
 ### Como rodar
 
 ```bash
-pip install -r requirements.txt   # playwright já usado no MVP-01
-playwright install chromium       # se ainda não tiver rodado
+pip install -r requirements.txt   # inclui requests
 
-python compare_mercadolivre.py produtos.csv
+export GECKOAPI_TOKEN="seu_token"
+
+python compare_mercadolivre.py produtos.csv --max-products 3   # teste rápido, gasta poucos créditos
 python compare_mercadolivre.py produtos.csv --output comparacao.csv --min-score 0.6
-python compare_mercadolivre.py produtos.csv --headed   # navegador visível, útil para depurar
+python compare_mercadolivre.py produtos.csv --power-seller     # só vendedores com selo PowerSeller/MercadoLíder
 ```
 
 O CSV de saída traz, por produto: `ml_listing_count`, `ml_min_price`,
@@ -134,43 +174,14 @@ match (`ml_best_match_title/score/url`) e a diferença bruta em relação ao
 preço da Amazon (`diff_avg_vs_amazon`, `diff_avg_pct`) — ainda sem
 descontar comissão, frete ou impostos.
 
-### Triagem antibot / tela de verificação de conta
-
-O Mercado Livre pode redirecionar sessões que parecem automatizadas (sem
-cookies, indo direto a um link profundo) para uma tela
-`/gz/account-verification` pedindo login antes de mostrar a busca — não é
-um CAPTCHA, é um pedido de autenticação mesmo. Para reduzir a chance
-disso:
-
-- O script mantém um **perfil de navegador persistente** em
-  `arbitragem/.ml_browser_profile/` (cookies salvos entre execuções, git-
-  ignorado) em vez de abrir uma sessão anônima do zero a cada vez.
-- Antes de qualquer busca, ele visita a página inicial do Mercado Livre
-  (`warm_up()`) e tenta fechar o banner de cookies, simulando uma
-  navegação mais parecida com a de uma pessoa.
-
-Isso reduz a chance de bloqueio, mas **não elimina**: a triagem do
-Mercado Livre é uma heurística deles, fora do nosso controle. Se mesmo
-assim aparecer a tela de verificação, o script detecta isso
-(`BlockedError`) e para a execução com uma mensagem clara, em vez de
-retornar silenciosamente 0 resultados para tudo (como acontecia antes).
-Nesse caso, rodar de novo mais tarde costuma ajudar; se for recorrente,
-a única forma de contornar de verdade seria autenticar com uma conta real
-do Mercado Livre — o que traz risco de restrição na conta e não deve ser
-feito sem decidir isso conscientemente antes.
-
 ### Outros avisos importantes
 
-- Assim como no scraper da Amazon, o HTML do Mercado Livre muda com
-  frequência; os seletores usam fallbacks (`CARD_SELECTOR`,
-  `TITLE_SELECTOR`, `LINK_SELECTOR` em `compare_mercadolivre.py`), mas
-  ainda exigem manutenção periódica.
-- A condição "novo"/"usado" é inferida pela presença da palavra "usado"
-  no texto do card — o Mercado Livre normalmente só rotula anúncios
-  usados explicitamente. É uma heurística simples, não uma leitura
-  estruturada do campo `condition`.
-- O script não tenta contornar CAPTCHA; se detectado, a execução para
-  (veja seção acima).
+- A condição "novo"/"usado" é inferida a partir de um campo `condition`
+  da API, se vier preenchido, com heurística de fallback no título — pode
+  errar em casos limítrofes, mas é razoável para o MVP.
+- Se a GeckoAPI retornar erro de rede ou HTTP (ex.: token inválido, sem
+  créditos), o script registra o erro no console e segue para o próximo
+  produto em vez de travar a execução inteira.
 
 ## Próximos passos (fora do escopo deste MVP)
 
