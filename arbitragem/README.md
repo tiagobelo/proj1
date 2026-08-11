@@ -141,7 +141,7 @@ nomes de campo em `parse_item()`.
 
 A página de "Mais vendidos" da Amazon não expõe marca/modelo/EAN de forma
 estruturada, então usamos o nível 3 do plano de identificação em camadas
-(título normalizado), com três filtros para reduzir falsos positivos:
+(título normalizado), com quatro filtros para reduzir falsos positivos:
 
 1. **Score de similaridade**: sobreposição de palavras significativas entre
    o título da Amazon e o do anúncio do Mercado Livre (`--min-score`,
@@ -163,6 +163,15 @@ estruturada, então usamos o nível 3 do plano de identificação em camadas
    anúncio de 4 unidades). Quando nenhum dos dois títulos menciona
    quantidade, o filtro não se aplica — é uma limitação conhecida, não dá
    pra confirmar quantidade nesse caso.
+4. **Filtro de número de modelo/geração**: para famílias de produto tipo
+   "iPhone N" (`iphone`, `ipad`, `galaxy`, `watch`, `redmi`, `echo`,
+   `fire tv`, `playstation`/`ps`, `xbox` seguidos de um número solto),
+   descarta o anúncio se o número de geração for diferente — problema real
+   encontrado comparando um "iPhone 17" da Amazon com um "iPhone 15" do
+   Mercado Livre, que pontuava alto porque as demais palavras do título
+   (marca, capacidade, cor) eram idênticas. Não interfere em casos como
+   "Galaxy A57"/"Echo Dot 5a" porque o número vem colado a uma letra
+   ("a57", "5a"), que já é diferenciado normalmente pelo score de palavras.
 
 Além disso, só considera anúncios com `condition == "new"` (produto novo,
 já que o objetivo é revenda) e remove outliers de preço pela regra do IQR

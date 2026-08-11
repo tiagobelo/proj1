@@ -93,6 +93,18 @@ QUANTITY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Detecta "<linha de produto> <número de geração/modelo>" para famílias
+# onde o número sozinho (sem sufixo tipo "GB"/"unidades") indica um
+# produto diferente — ex.: "iPhone 17" vs "iPhone 15". Sem isso, o score
+# de similaridade pode ficar alto o bastante pra passar no filtro mesmo
+# comparando gerações diferentes, já que a maioria das outras palavras do
+# título (marca, cor, capacidade) é igual — problema real encontrado
+# comparando um iPhone 17 da Amazon com um iPhone 15 do Mercado Livre.
+MODEL_NUMBER_RE = re.compile(
+    r"\b(iphone|ipad|galaxy|watch|redmi|echo|fire\s*tv|playstation|ps|xbox)\s+(\d{1,3})\b",
+    re.IGNORECASE,
+)
+
 OUTPUT_FIELDNAMES = [
     "asin",
     "amazon_title",
@@ -184,6 +196,26 @@ def has_quantity_mismatch(amazon_title: str, ml_title: str) -> bool:
     amazon_qty = extract_quantity(amazon_title)
     ml_qty = extract_quantity(ml_title)
     return amazon_qty is not None and ml_qty is not None and amazon_qty != ml_qty
+
+
+def extract_model_number(title: str) -> tuple[str, int] | None:
+    """Extrai (linha_de_produto, número) de padrões tipo "iPhone 17" ->
+    ("iphone", 17). Retorna None quando o título não segue esse padrão —
+    a maioria dos casos (ex.: "Echo Dot 5a Geração", "Galaxy A57") não
+    bate porque o número vem colado a uma letra, e nesses casos a
+    diferenciação já é feita naturalmente pelo score de palavras."""
+    match = MODEL_NUMBER_RE.search(title)
+    if not match:
+        return None
+    return match.group(1).lower().replace(" ", ""), int(match.group(2))
+
+
+def has_model_number_mismatch(amazon_title: str, ml_title: str) -> bool:
+    amazon_model = extract_model_number(amazon_title)
+    ml_model = extract_model_number(ml_title)
+    if amazon_model is None or ml_model is None:
+        return False
+    return amazon_model[0] == ml_model[0] and amazon_model[1] != ml_model[1]
 
 
 def parse_price_value(value) -> float | None:
@@ -300,6 +332,8 @@ def filter_and_score(amazon_title: str, results: list[dict], min_score: float) -
         if looks_like_accessory(amazon_title, ml_title, amazon_words, ml_words):
             continue
         if has_quantity_mismatch(amazon_title, ml_title):
+            continue
+        if has_model_number_mismatch(amazon_title, ml_title):
             continue
         score = match_score(amazon_title, ml_title)
         if score < min_score:
