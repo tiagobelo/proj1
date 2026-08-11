@@ -1,0 +1,22 @@
+# Páginas "Mais vendidos" da Amazon.com.br que serão coletadas pelo scraper.
+# Adicione/remova categorias aqui; nenhuma mudança de código é necessária.
+categories:
+  - slug: eletronicos
+    name: Eletrônicos
+    url: https://www.amazon.com.br/gp/bestsellers/electronics/
+
+  - slug: informatica
+    name: Informática
+    url: https://www.amazon.com.br/gp/bestsellers/computers/
+
+  - slug: casa
+    name: Casa
+    url: https://www.amazon.com.br/gp/bestsellers/home/
+
+  - slug: ferramentas
+    name: Ferramentas
+    url: https://www.amazon.com.br/gp/bestsellers/hi/
+
+  - slug: acessorios-celular
+    name: Acessórios para celular
+    url: https://www.amazon.com.br/gp/bestsellers/wireless/
