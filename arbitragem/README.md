@@ -141,7 +141,7 @@ nomes de campo em `parse_item()`.
 
 A página de "Mais vendidos" da Amazon não expõe marca/modelo/EAN de forma
 estruturada, então usamos o nível 3 do plano de identificação em camadas
-(título normalizado), com quatro filtros para reduzir falsos positivos:
+(título normalizado), com cinco filtros para reduzir falsos positivos:
 
 1. **Score de similaridade**: sobreposição de palavras significativas entre
    o título da Amazon e o do anúncio do Mercado Livre (`--min-score`,
@@ -154,16 +154,21 @@ estruturada, então usamos o nível 3 do plano de identificação em camadas
    títulos confirmam a mesma quantidade (ver item 3) — senão um multipack
    genuíno descrito como "Kit com 16 unidades" seria descartado à toa.
 3. **Filtro de quantidade**: quando os dois títulos mencionam
-   explicitamente uma quantidade de itens (ex.: "16 unidades"), anúncios
-   com quantidade diferente são descartados mesmo com score alto. Sem
-   isso, um pacote de 4 pilhas e um de 16 pilhas do mesmo fabricante têm
-   score de similaridade ~1.0 (só a palavra da quantidade muda) e seriam
-   tratados como o mesmo produto — problema real encontrado em teste com
-   dados reais (`Pilha Alcalina AAA com 16 unidades` batendo com um
-   anúncio de 4 unidades). Quando nenhum dos dois títulos menciona
-   quantidade, o filtro não se aplica — é uma limitação conhecida, não dá
-   pra confirmar quantidade nesse caso.
-4. **Filtro de número de modelo/geração**: para famílias de produto tipo
+   explicitamente uma quantidade de itens (ex.: "16 unidades", ou a
+   abreviação "C/4"), anúncios com quantidade diferente são descartados
+   mesmo com score alto. Sem isso, um pacote de 4 pilhas e um de 16 pilhas
+   do mesmo fabricante têm score de similaridade ~1.0 (só a palavra da
+   quantidade muda) e seriam tratados como o mesmo produto — problema real
+   encontrado em teste com dados reais. Quando nenhum dos dois títulos
+   menciona quantidade (nem a forma longa nem a abreviada), o filtro não
+   se aplica — limitação conhecida, não dá pra confirmar quantidade nesse
+   caso.
+4. **Filtro de tamanho de pilha**: "AA" e "AAA" são produtos diferentes,
+   mas "AA" tem só 2 caracteres e o score de palavras normalmente descarta
+   palavras tão curtas — na prática, o matching nunca soube diferenciar
+   "Pilha AA" de "Pilha AAA" até esse filtro existir. Mesmo padrão de
+   filtro rígido dos itens 3 e 5, específico para essa categoria.
+5. **Filtro de número de modelo/geração**: para famílias de produto tipo
    "iPhone N" (`iphone`, `ipad`, `galaxy`, `watch`, `redmi`, `echo`,
    `fire tv`, `playstation`/`ps`, `xbox` seguidos de um número solto),
    descarta o anúncio se o número de geração for diferente — problema real
@@ -176,6 +181,11 @@ estruturada, então usamos o nível 3 do plano de identificação em camadas
 Além disso, só considera anúncios com `condition == "new"` (produto novo,
 já que o objetivo é revenda) e remove outliers de preço pela regra do IQR
 antes de calcular a média.
+
+O console imprime, para cada produto, todos os anúncios que passaram no
+filtro (preço, score e título), ordenados por preço — útil para investigar
+números estranhos no CSV (ex.: um preço mínimo muito baixo) sem precisar
+rodar de novo só para depurar.
 
 ### Como rodar
 

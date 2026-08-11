@@ -92,6 +92,18 @@ QUANTITY_RE = re.compile(
     r"(\d+)\s*(?:unidades|unidade|unid\.?|uni\.?|un\.?|pe(?:c|ç)as?|pcs?\.?)\b",
     re.IGNORECASE,
 )
+# Abreviação comum no Mercado Livre para quantidade, sem a palavra
+# "unidades" (ex.: "Pilha AAA 900mah C/4 Elgin"). Encontramos um caso real
+# em que isso deixou passar sem checagem — funcionou por coincidência,
+# mas o gap existia.
+QUANTITY_SHORTHAND_RE = re.compile(r"\bc/\s*(\d+)\b", re.IGNORECASE)
+
+# Tamanhos de pilha: "AA" e "AAA" são produtos diferentes (tamanho físico
+# e preço distintos), mas "AA" tem só 2 letras e era descartado pelo
+# filtro de tamanho mínimo em normalize() — na prática, o score nunca
+# soube diferenciar "Pilha AA" de "Pilha AAA". Ambos ficam protegidos
+# aqui, com um filtro rígido equivalente ao de quantidade/modelo.
+BATTERY_SIZE_RE = re.compile(r"\b(aaaa|aaa|aa|9v)\b", re.IGNORECASE)
 
 # Detecta "<linha de produto> <número de geração/modelo>" para famílias
 # onde o número sozinho (sem sufixo tipo "GB"/"unidades") indica um
@@ -169,10 +181,21 @@ def match_score(amazon_title: str, ml_title: str) -> float:
 
 def extract_quantity(title: str) -> int | None:
     """Extrai a quantidade de itens do pacote mencionada no título, se
-    houver (ex.: "com 16 unidades" -> 16). Retorna None quando o título
-    não menciona quantidade explicitamente."""
-    match = QUANTITY_RE.search(title)
+    houver (ex.: "com 16 unidades" -> 16, ou a abreviação "C/4" -> 4).
+    Retorna None quando o título não menciona quantidade explicitamente."""
+    match = QUANTITY_RE.search(title) or QUANTITY_SHORTHAND_RE.search(title)
     return int(match.group(1)) if match else None
+
+
+def extract_battery_size(title: str) -> str | None:
+    match = BATTERY_SIZE_RE.search(title)
+    return match.group(1).lower() if match else None
+
+
+def has_battery_size_mismatch(amazon_title: str, ml_title: str) -> bool:
+    amazon_size = extract_battery_size(amazon_title)
+    ml_size = extract_battery_size(ml_title)
+    return amazon_size is not None and ml_size is not None and amazon_size != ml_size
 
 
 def looks_like_accessory(amazon_title: str, ml_title: str, amazon_words: set[str], ml_words: set[str]) -> bool:
@@ -333,6 +356,8 @@ def filter_and_score(amazon_title: str, results: list[dict], min_score: float) -
             continue
         if has_quantity_mismatch(amazon_title, ml_title):
             continue
+        if has_battery_size_mismatch(amazon_title, ml_title):
+            continue
         if has_model_number_mismatch(amazon_title, ml_title):
             continue
         score = match_score(amazon_title, ml_title)
@@ -380,6 +405,8 @@ def compare_product(
 
     matches = filter_and_score(amazon_title, results, min_score)
     print(f"  {len(results)} resultados brutos, {len(matches)} passaram no filtro de matching")
+    for m in sorted(matches, key=lambda m: m.get("price") or 0):
+        print(f"    R$ {m.get('price')} (score {round(m['_match_score'], 2)}) - {m['title']}")
 
     row = {
         "asin": asin,
