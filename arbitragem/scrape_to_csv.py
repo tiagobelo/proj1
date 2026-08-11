@@ -30,6 +30,7 @@ DEFAULT_URL = "https://www.amazon.com.br/gp/bestsellers/electronics/"
 ASIN_RE = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})")
 RATING_RE = re.compile(r"([\d,.]+)\s+de\s+5\s+estrelas", re.IGNORECASE)
 PRICE_RE = re.compile(r"[\d.,]+")
+PRICE_TEXT_RE = re.compile(r"R\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})?")
 CAPTCHA_MARKERS = ("Digite os caracteres", "Enter the characters you see", "/errors/validateCaptcha")
 
 FIELDNAMES = ["rank", "asin", "title", "price", "rating", "review_count", "url", "image_url"]
@@ -74,6 +75,25 @@ def extract_asin(href: str | None) -> str | None:
     return match.group(1) if match else None
 
 
+def extract_price(card) -> float | None:
+    """Tenta seletores conhecidos e, se falhar, cai para uma busca por
+    regex de 'R$ 99,90' em todo o texto do card. A Amazon costuma gerar
+    classes CSS "hasheadas" por build (ex.: `_cDEzb_p13n-sc-price_3mJ9Z`),
+    então seletores de classe exata quebram com frequência; o fallback por
+    texto é mais resistente a essas mudanças de markup.
+    """
+    price_el = card.query_selector(
+        ".a-price .a-offscreen, [class*='p13n-sc-price'], [class*='a-price'] .a-offscreen"
+    )
+    price_text = price_el.inner_text() if price_el else None
+
+    if not price_text:
+        match = PRICE_TEXT_RE.search(card.inner_text())
+        price_text = match.group(0) if match else None
+
+    return parse_price(price_text)
+
+
 def extract_product(card) -> dict | None:
     link = card.query_selector("a.a-link-normal[href*='/dp/'], a.a-link-normal[href*='/gp/product/']")
     if link is None:
@@ -99,8 +119,7 @@ def extract_product(card) -> dict | None:
         if rank_match:
             rank = int(rank_match.group(0))
 
-    price_el = card.query_selector(".a-price .a-offscreen, .p13n-sc-price")
-    price = parse_price(price_el.inner_text() if price_el else None)
+    price = extract_price(card)
 
     rating_el = card.query_selector("[aria-label*='de 5 estrelas'], [aria-label*='out of 5 stars']")
     rating = parse_rating(rating_el.get_attribute("aria-label") if rating_el else None)
