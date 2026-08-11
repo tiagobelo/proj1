@@ -1,0 +1,24 @@
+# Comissão do Mercado Livre por domínio de categoria (domainId retornado
+# pela GeckoAPI, ex.: "MLB-CELL_BATTERIES"), usada por generate_report.py
+# quando --commission-pct não é informado na linha de comando.
+#
+# Valores de referência (ago/2026): categoria "Eletrônicos e Informática"
+# fica entre 11% e 13% no anúncio clássico. Não há uma tabela pública
+# granular por domínio — os valores abaixo usam esse intervalo como
+# estimativa uniforme para os domínios já vistos em teste. Cada subcategoria
+# pode ter uma taxa ligeiramente diferente; confirme os valores reais no
+# Simulador de Custos oficial (dentro do Seller Center) antes de decidir
+# uma compra:
+# https://www.mercadolivre.com.br/ajuda/formas-de-pagamento/custos
+#
+# Adicione um domínio novo aqui conforme for testando categorias diferentes
+# (o domainId de cada produto aparece na coluna ml_domain_id do CSV gerado
+# por compare_mercadolivre.py).
+domains:
+  MLB-CELL_BATTERIES: 12.0
+  MLB-CELLPHONES: 12.0
+  MLB-HEADPHONES: 12.0
+  MLB-SMARTWATCHES: 12.0
+
+# Usado quando o domínio do produto não está no mapa acima.
+default: 12.0

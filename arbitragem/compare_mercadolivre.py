@@ -35,12 +35,30 @@ como fallback. Na primeira busca, a resposta bruta da API é salva em
 geckoapi_debug_sample.json — se os resultados vierem estranhos, veja
 esse arquivo para ajustar os nomes de campo em parse_item().
 
+Categoria e EAN: a GeckoAPI retorna `categoryId`/`domainId` (a
+classificação oficial de categoria do Mercado Livire) e `ean` para cada
+anúncio — capturados aqui e exportados no CSV (`ml_category_id`,
+`ml_domain_id`, `ml_ean`) para o generate_report.py escolher a comissão
+certa automaticamente. Quando o CSV de entrada (gerado por
+scrape_to_csv.py) também tiver uma coluna `ean` preenchida, um EAN igual
+nos dois lados é tratado como confirmação definitiva de mesmo produto,
+pulando os filtros heurísticos — na prática isso só ativa se a Amazon
+também expuser EAN, o que a página de "Mais vendidos" não faz hoje.
+
+Verificação por IA (opcional, --ai-verify): depois dos filtros
+determinísticos, envia os candidatos sobreviventes de cada produto (em
+um único lote) para a API do DeepSeek, pedindo para confirmar quais são
+de fato o mesmo produto. É um refinamento, não substitui os filtros —
+roda só nos casos que já passaram por eles. Requer a variável de
+ambiente DEEPSEEK_API_KEY (chave gerada em platform.deepseek.com).
+
 Dependência: requests (pip install requests)
 
 Uso:
     python compare_mercadolivre.py produtos.csv
     python compare_mercadolivre.py produtos.csv --max-products 3
     python compare_mercadolivre.py produtos.csv --output comparacao.csv --min-score 0.6
+    python compare_mercadolivre.py produtos.csv --ai-verify
 """
 
 from __future__ import annotations
@@ -58,6 +76,9 @@ import requests
 
 GECKOAPI_URL = "https://api.geckoapi.com.br/v1/extract"
 DEBUG_SAMPLE_PATH = "geckoapi_debug_sample.json"
+
+DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_MODEL = "deepseek-chat"
 
 STOPWORDS = {
     "de", "da", "do", "das", "dos", "com", "para", "e", "ou", "um", "uma",
@@ -170,6 +191,9 @@ OUTPUT_FIELDNAMES = [
     "ml_best_match_title",
     "ml_best_match_score",
     "ml_best_match_url",
+    "ml_category_id",
+    "ml_domain_id",
+    "ml_ean",
     "diff_avg_vs_amazon",
     "diff_avg_pct",
 ]
@@ -391,7 +415,15 @@ def parse_item(raw: dict) -> dict | None:
     else:
         condition = "used" if "usado" in title.lower() else "new"
 
-    return {"title": title, "permalink": url, "price": price, "condition": condition}
+    return {
+        "title": title,
+        "permalink": url,
+        "price": price,
+        "condition": condition,
+        "category_id": raw.get("categoryId"),
+        "domain_id": raw.get("domainId"),
+        "ean": raw.get("ean"),
+    }
 
 
 def search_mercadolivre(
@@ -431,13 +463,25 @@ def search_mercadolivre(
     return results
 
 
-def filter_and_score(amazon_title: str, results: list[dict], min_score: float) -> list[dict]:
+def filter_and_score(amazon_title: str, results: list[dict], min_score: float, amazon_ean: str = "") -> list[dict]:
     amazon_words = normalize(amazon_title)
+    amazon_ean = (amazon_ean or "").strip()
     filtered = []
     for item in results:
         if item.get("condition") != "new":
             continue
         ml_title = item.get("title", "")
+
+        # EAN igual nos dois lados é confirmação definitiva do mesmo
+        # produto — pula os filtros heurísticos. Na prática só ativa
+        # quando o CSV da Amazon também tem EAN preenchido, o que a
+        # página de "Mais vendidos" não expõe hoje.
+        ml_ean = str(item.get("ean") or "").strip()
+        if amazon_ean and ml_ean and amazon_ean == ml_ean:
+            item["_match_score"] = 1.0
+            filtered.append(item)
+            continue
+
         ml_words = normalize(ml_title)
         if looks_like_accessory(amazon_title, ml_title, amazon_words, ml_words):
             continue
@@ -463,6 +507,52 @@ def filter_and_score(amazon_title: str, results: list[dict], min_score: float) -
     return filtered
 
 
+def ai_verify_matches(amazon_title: str, candidates: list[dict], api_key: str) -> list[dict]:
+    """Refinamento opcional via DeepSeek: manda os candidatos que já
+    sobreviveram aos filtros determinísticos (em um único lote) e pede
+    para confirmar quais são de fato o mesmo produto. Não substitui os
+    filtros — só reduz ainda mais a lista deles pra baixo. Em qualquer
+    falha (rede, resposta inesperada), mantém os candidatos originais em
+    vez de descartar dados por causa de um problema na IA."""
+    if not candidates:
+        return candidates
+
+    numbered = "\n".join(f"{i}. {c['title']}" for i, c in enumerate(candidates))
+    prompt = (
+        "Produto de referência (Amazon):\n"
+        f"{amazon_title}\n\n"
+        "Anúncios candidatos do Mercado Livre (numerados):\n"
+        f"{numbered}\n\n"
+        "Para cada número, avalie se é o MESMO produto do produto de "
+        "referência: mesma marca, mesmo modelo/geração, mesma "
+        "quantidade/capacidade quando aplicável. Variação de cor é "
+        "aceitável. Responda SOMENTE com um JSON no formato "
+        '{"matches": [0, 2, 5]} contendo os números dos candidatos que '
+        'são o mesmo produto. Se nenhum for, responda {"matches": []}.'
+    )
+
+    try:
+        resp = requests.post(
+            DEEPSEEK_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": DEEPSEEK_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        keep_indices = set(json.loads(content)["matches"])
+    except Exception as exc:
+        print(f"  Aviso: verificação por IA falhou ({exc}); mantendo os candidatos dos filtros determinísticos.")
+        return candidates
+
+    return [c for i, c in enumerate(candidates) if i in keep_indices]
+
+
 def remove_price_outliers(prices: list[float]) -> list[float]:
     """Remove outliers pela regra do IQR, para que um único anúncio fora
     da curva não distorça a média. Com poucas amostras, mantém tudo."""
@@ -483,11 +573,14 @@ def compare_product(
     amazon_title: str,
     amazon_price: str,
     amazon_url: str,
+    amazon_ean: str,
     token: str,
     min_score: float,
     delay: float,
     power_seller: bool | None,
     save_debug: bool,
+    ai_verify: bool,
+    deepseek_api_key: str | None,
 ) -> dict:
     query = build_query(amazon_title)
     print(f"Buscando no Mercado Livre (GeckoAPI): '{query}'")
@@ -498,8 +591,14 @@ def compare_product(
         print(f"  Erro na busca: {exc}")
         results = []
 
-    matches = filter_and_score(amazon_title, results, min_score)
+    matches = filter_and_score(amazon_title, results, min_score, amazon_ean=amazon_ean)
     print(f"  {len(results)} resultados brutos, {len(matches)} passaram no filtro de matching")
+
+    if ai_verify and matches:
+        before = len(matches)
+        matches = ai_verify_matches(amazon_title, matches, deepseek_api_key)
+        print(f"  IA (DeepSeek) confirmou {len(matches)} de {before} candidatos")
+
     for m in sorted(matches, key=lambda m: m.get("price") or 0):
         print(f"    R$ {m.get('price')} (score {round(m['_match_score'], 2)}) - {m['title']}")
 
@@ -516,6 +615,9 @@ def compare_product(
         "ml_best_match_title": "",
         "ml_best_match_score": "",
         "ml_best_match_url": "",
+        "ml_category_id": "",
+        "ml_domain_id": "",
+        "ml_ean": "",
         "diff_avg_vs_amazon": "",
         "diff_avg_pct": "",
     }
@@ -534,6 +636,9 @@ def compare_product(
         row["ml_best_match_title"] = best.get("title", "")
         row["ml_best_match_score"] = round(best["_match_score"], 2)
         row["ml_best_match_url"] = best.get("permalink", "")
+        row["ml_category_id"] = best.get("category_id") or ""
+        row["ml_domain_id"] = best.get("domain_id") or ""
+        row["ml_ean"] = best.get("ean") or ""
 
         if amazon_price and row["ml_avg_price"] != "":
             try:
@@ -555,6 +660,7 @@ def main() -> None:
     parser.add_argument("--delay", type=float, default=1.0, help="Segundos entre buscas (padrão 1.0)")
     parser.add_argument("--max-products", type=int, default=None, help="Processa só os N primeiros produtos do CSV (útil para testar sem gastar muitos créditos)")
     parser.add_argument("--power-seller", action="store_true", help="Filtra só vendedores com selo PowerSeller/MercadoLíder")
+    parser.add_argument("--ai-verify", action="store_true", help="Refina os matches sobreviventes dos filtros com a API do DeepSeek (requer DEEPSEEK_API_KEY)")
     args = parser.parse_args()
 
     token = os.getenv("GECKOAPI_TOKEN")
@@ -562,6 +668,13 @@ def main() -> None:
         raise SystemExit(
             "Defina a variável de ambiente GECKOAPI_TOKEN com seu token da GeckoAPI "
             "antes de rodar (veja instruções no topo de compare_mercadolivre.py ou no README.md)."
+        )
+
+    deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
+    if args.ai_verify and not deepseek_api_key:
+        raise SystemExit(
+            "--ai-verify requer a variável de ambiente DEEPSEEK_API_KEY "
+            "(chave gerada em platform.deepseek.com)."
         )
 
     with open(args.input_csv, encoding="utf-8-sig") as f:
@@ -577,11 +690,14 @@ def main() -> None:
             product["title"],
             product.get("price", ""),
             product["url"],
+            product.get("ean", ""),
             token,
             args.min_score,
             args.delay,
             power_seller=True if args.power_seller else None,
             save_debug=(i == 0),
+            ai_verify=args.ai_verify,
+            deepseek_api_key=deepseek_api_key,
         )
         rows.append(row)
 

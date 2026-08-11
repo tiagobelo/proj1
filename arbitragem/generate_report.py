@@ -10,13 +10,19 @@ IMPORTANTE sobre as taxas do Mercado Livre: a partir de mar/2026 o custo
 operacional passou a ser calculado por peso/dimensão do produto em vez de
 uma taxa fixa simples, e a comissão varia por categoria (10-14% no
 anúncio clássico, 15-19% no premium). Como este pipeline não coleta
-peso/dimensão dos produtos, os valores usados aqui são ESTIMATIVAS
-configuráveis por linha de comando — confirme os valores reais no
-Simulador de Custos oficial (dentro do Seller Center) antes de decidir
-uma compra:
+peso/dimensão dos produtos, os valores usados aqui são ESTIMATIVAS —
+confirme os valores reais no Simulador de Custos oficial (dentro do
+Seller Center) antes de decidir uma compra:
 https://www.mercadolivre.com.br/ajuda/formas-de-pagamento/custos
 
-Dependência: openpyxl (pip install openpyxl)
+Comissão automática por categoria: se --commission-pct não for passado,
+a comissão é escolhida a partir da coluna ml_domain_id do CSV (a
+categoria oficial do Mercado Livre, capturada pelo compare_mercadolivre.py
+via GeckoAPI) usando o mapa em config/ml_fees.yaml. Passar
+--commission-pct explicitamente ignora esse mapa e usa um valor único
+fixo para todas as linhas, como antes.
+
+Dependência: openpyxl, PyYAML (pip install openpyxl pyyaml)
 
 Uso:
     python generate_report.py comparacao.csv
@@ -29,10 +35,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+from pathlib import Path
 
+import yaml
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+
+DEFAULT_FEES_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "ml_fees.yaml"
 
 CURRENCY_FORMAT = '"R$" #,##0.00'
 PERCENT_FORMAT = "0.0%"
@@ -55,6 +65,8 @@ COLUMNS = [
     ("Base do preço ML", 14),
     ("Nº anúncios ML", 12),
     ("Score do match", 12),
+    ("Categoria ML", 22),
+    ("Comissão (%)", 12),
     ("Comissão ML", 14),
     ("Custo fixo", 12),
     ("Frete", 12),
@@ -66,6 +78,25 @@ COLUMNS = [
     ("Link Amazon", 40),
     ("Link Mercado Livre", 40),
 ]
+
+
+def load_fees_config(path: Path) -> dict:
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def resolve_commission_pct(domain_id: str, fees_config: dict, override: float | None) -> float:
+    """Se o usuário passou --commission-pct, esse valor vale para todas as
+    linhas (comportamento antigo). Senão, escolhe pelo domainId da
+    categoria (ml_domain_id no CSV) usando config/ml_fees.yaml, com
+    fallback pro valor 'default' do arquivo quando o domínio não está
+    mapeado ou vem vazio."""
+    if override is not None:
+        return override
+    domains = fees_config.get("domains", {})
+    if domain_id and domain_id in domains:
+        return float(domains[domain_id])
+    return float(fees_config.get("default", 12.0))
 
 
 def parse_float(value: str) -> float | None:
@@ -106,6 +137,7 @@ def calculate_opportunity(
     sale_price = pick_sale_price(row, basis)
     listing_count = row.get("ml_listing_count", "")
     match_score = row.get("ml_best_match_score", "")
+    domain_id = row.get("ml_domain_id", "")
 
     result = {
         "title": row.get("amazon_title", ""),
@@ -115,6 +147,8 @@ def calculate_opportunity(
         "basis": basis,
         "listing_count": listing_count,
         "match_score": match_score,
+        "domain_id": domain_id,
+        "commission_pct": commission_pct,
         "commission": None,
         "fixed_fee": None,
         "shipping": None,
@@ -177,6 +211,8 @@ def build_workbook(opportunities: list[dict]) -> Workbook:
             basis_label.get(opp["basis"], opp["basis"]),
             opp["listing_count"],
             opp["match_score"],
+            opp["domain_id"],
+            (opp["commission_pct"] / 100) if opp.get("commission_pct") is not None else None,
             opp["commission"],
             opp["fixed_fee"],
             opp["shipping"],
@@ -194,7 +230,7 @@ def build_workbook(opportunities: list[dict]) -> Workbook:
             header = COLUMNS[col_idx - 1][0]
             if header in ("Preço Amazon (custo)", "Preço Mercado Livre", "Comissão ML", "Custo fixo", "Frete", "Imposto", "Lucro líquido"):
                 cell.number_format = CURRENCY_FORMAT
-            elif header in ("Margem", "ROI"):
+            elif header in ("Margem", "ROI", "Comissão (%)"):
                 cell.number_format = PERCENT_FORMAT
 
     return wb
@@ -205,7 +241,8 @@ def main() -> None:
     parser.add_argument("input_csv", help="CSV gerado por compare_mercadolivre.py")
     parser.add_argument("--output", default="oportunidades.xlsx", help="Caminho do XLSX de saída")
     parser.add_argument("--price-basis", choices=["median", "avg", "min"], default="median", help="Qual preço do Mercado Livre usar como preço de venda esperado (padrão: median, mais resistente a outliers)")
-    parser.add_argument("--commission-pct", type=float, default=12.0, help="Comissão do Mercado Livre em %% (padrão 12, varia 10-14%% clássico / 15-19%% premium por categoria — confirme no Simulador de Custos)")
+    parser.add_argument("--commission-pct", type=float, default=None, help="Comissão do Mercado Livre em %% fixa para todas as linhas. Se omitido, escolhe automaticamente por categoria (ml_domain_id) usando config/ml_fees.yaml — confirme os valores no Simulador de Custos")
+    parser.add_argument("--fees-config", default=str(DEFAULT_FEES_CONFIG_PATH), help="Caminho do YAML de comissão por categoria (padrão: config/ml_fees.yaml)")
     parser.add_argument("--fixed-fee", type=float, default=6.0, help="Custo fixo estimado em R$ por venda (padrão 6.00 — desde mar/2026 o ML calcula isso por peso/dimensão; confirme no Simulador de Custos)")
     parser.add_argument("--shipping-cost", type=float, default=0.0, help="Frete estimado em R$ que o vendedor absorve (padrão 0 — normalmente é um custo real relevante, ajuste para o seu caso)")
     parser.add_argument("--tax-pct", type=float, default=0.0, help="Imposto sobre a venda em %% (padrão 0 — depende do seu regime tributário, ex.: Simples Nacional)")
@@ -216,6 +253,8 @@ def main() -> None:
     if args.shipping_cost == 0.0:
         print("Aviso: --shipping-cost está em 0. Frete costuma ser um custo real e relevante — considere ajustar.\n")
 
+    fees_config = load_fees_config(Path(args.fees_config))
+
     with open(args.input_csv, encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
 
@@ -223,7 +262,7 @@ def main() -> None:
         calculate_opportunity(
             row,
             args.price_basis,
-            args.commission_pct,
+            resolve_commission_pct(row.get("ml_domain_id", ""), fees_config, args.commission_pct),
             args.fixed_fee,
             args.shipping_cost,
             args.tax_pct,

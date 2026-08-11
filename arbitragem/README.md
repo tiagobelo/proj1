@@ -244,13 +244,50 @@ export GECKOAPI_TOKEN="seu_token"
 python compare_mercadolivre.py produtos.csv --max-products 3   # teste rápido, gasta poucos créditos
 python compare_mercadolivre.py produtos.csv --output comparacao.csv --min-score 0.6
 python compare_mercadolivre.py produtos.csv --power-seller     # só vendedores com selo PowerSeller/MercadoLíder
+python compare_mercadolivre.py produtos.csv --ai-verify        # refinamento por IA, ver seção abaixo
 ```
 
 O CSV de saída traz, por produto: `ml_listing_count`, `ml_min_price`,
 `ml_avg_price`, `ml_max_price`, `ml_median_price`, o anúncio de melhor
-match (`ml_best_match_title/score/url`) e a diferença bruta em relação ao
-preço da Amazon (`diff_avg_vs_amazon`, `diff_avg_pct`) — ainda sem
-descontar comissão, frete ou impostos.
+match (`ml_best_match_title/score/url`), a categoria oficial do Mercado
+Livre do melhor match (`ml_category_id`, `ml_domain_id`), o EAN quando o
+anúncio tiver (`ml_ean`) e a diferença bruta em relação ao preço da
+Amazon (`diff_avg_vs_amazon`, `diff_avg_pct`) — ainda sem descontar
+comissão, frete ou impostos (isso é o MVP-03).
+
+### Categoria, EAN e verificação por IA
+
+- **Categoria automática**: a GeckoAPI retorna `categoryId`/`domainId` —
+  a classificação oficial de categoria do Mercado Livre — para cada
+  anúncio, sem custo extra. `generate_report.py` usa `ml_domain_id` para
+  escolher a comissão certa automaticamente (ver MVP-03 abaixo), em vez
+  de você ter que informar manualmente.
+- **Atalho por EAN**: quando o CSV de entrada (gerado por
+  `scrape_to_csv.py`) tem uma coluna `ean` preenchida e ela bate com o
+  `ean` de um anúncio do Mercado Livre, esse anúncio é tratado como o
+  mesmo produto com confiança máxima, pulando todos os filtros
+  heurísticos. **Limitação atual**: a página de "Mais vendidos" da
+  Amazon não expõe EAN, então esse atalho não ativa com os dados de hoje
+  — precisaria de scraping das páginas de detalhe de cada produto
+  (fora do escopo atual). O mecanismo já está pronto caso isso mude.
+- **Verificação por IA (`--ai-verify`)**: depois dos filtros
+  determinísticos (score, quantidade, marca, modelo, armazenamento etc.),
+  manda os candidatos sobreviventes de cada produto — em um único lote,
+  não um por anúncio — para a API do DeepSeek, pedindo para confirmar
+  quais são de fato o mesmo produto. É um refinamento opcional, não
+  substitui os filtros: só reduz ainda mais a lista deles quando
+  encontra algo que os filtros de palavra/regex não pegam. Em qualquer
+  falha (rede, resposta inesperada), mantém os candidatos que já
+  passaram nos filtros em vez de descartar dados.
+
+  ```bash
+  export DEEPSEEK_API_KEY="sua_chave"   # gerada em platform.deepseek.com
+  python compare_mercadolivre.py produtos.csv --ai-verify
+  ```
+
+  Cada produto do CSV gera uma chamada à API do DeepSeek (não uma por
+  anúncio candidato) — custo baixo, mas ainda assim real; teste primeiro
+  com `--max-products` antes de rodar um CSV grande.
 
 ### Outros avisos importantes
 
@@ -277,21 +314,36 @@ A partir de mar/2026 o Mercado Livre passou a calcular o custo
 operacional por **peso e dimensão** do produto em vez de uma taxa fixa
 simples por faixa de preço, e a comissão varia por categoria (10-14% no
 anúncio clássico, 15-19% no premium). Como este pipeline não coleta
-peso/dimensão de nenhum dos dois marketplaces, os valores usados no
-relatório são **estimativas configuráveis por linha de comando** — não
-valores exatos. Confirme os números reais no Simulador de Custos oficial
-(dentro do Seller Center) antes de decidir uma compra:
-https://www.mercadolivre.com.br/ajuda/formas-de-pagamento/custos
+peso/dimensão de nenhum dos dois marketplaces, o custo fixo/frete/imposto
+usados no relatório continuam sendo **estimativas configuráveis por
+linha de comando** — não valores exatos. Confirme os números reais no
+Simulador de Custos oficial (dentro do Seller Center) antes de decidir
+uma compra: https://www.mercadolivre.com.br/ajuda/formas-de-pagamento/custos
+
+A **comissão**, diferente dos demais custos, é escolhida automaticamente
+por categoria: `generate_report.py` lê `ml_domain_id` do CSV (capturado
+pelo `compare_mercadolivre.py` via GeckoAPI) e consulta
+[`config/ml_fees.yaml`](config/ml_fees.yaml) para achar o percentual —
+sem precisar você informar na mão. O arquivo vem com estimativas
+uniformes (12%) para os domínios já testados (pilhas, celulares, fones,
+smartwatch), dentro da faixa de 11-13% que a categoria "Eletrônicos e
+Informática" costuma ter no anúncio clássico — edite o YAML conforme for
+testando categorias novas e confirmando os valores reais. Passar
+`--commission-pct` explicitamente ignora esse mapa e usa um valor único
+fixo para todas as linhas, como antes.
 
 ### Como rodar
 
 ```bash
-pip install -r requirements.txt   # inclui openpyxl
+pip install -r requirements.txt   # inclui openpyxl e PyYAML
 
 python generate_report.py comparacao.csv
 python generate_report.py comparacao.csv --output oportunidades.xlsx \
-  --commission-pct 12 --fixed-fee 6 --shipping-cost 15 --tax-pct 4 \
+  --fixed-fee 6 --shipping-cost 15 --tax-pct 4 \
   --min-margin-pct 15 --min-roi-pct 20
+
+# força uma comissão única para todas as linhas, ignorando config/ml_fees.yaml
+python generate_report.py comparacao.csv --commission-pct 12
 ```
 
 Parâmetros (todos opcionais, com padrão):
@@ -299,11 +351,16 @@ Parâmetros (todos opcionais, com padrão):
 | Parâmetro | Padrão | Significado |
 |---|---|---|
 | `--price-basis` | `median` | Qual preço do Mercado Livre usar como venda esperada (`median`/`avg`/`min`) — mediana é mais resistente a outliers que a média |
-| `--commission-pct` | `12.0` | Comissão do Mercado Livre em % |
+| `--commission-pct` | *(automático por categoria)* | Comissão do Mercado Livre em %. Se omitido, escolhe por `ml_domain_id` via `config/ml_fees.yaml`; se informado, vale fixo para todas as linhas |
+| `--fees-config` | `config/ml_fees.yaml` | Caminho do YAML de comissão por categoria |
 | `--fixed-fee` | `6.0` | Custo fixo estimado em R$ por venda |
 | `--shipping-cost` | `0.0` | Frete estimado em R$ que o vendedor absorve — script avisa se ficar em 0 |
 | `--tax-pct` | `0.0` | Imposto sobre a venda em % (depende do seu regime tributário) |
 | `--min-margin-pct` / `--min-roi-pct` | `15.0` / `20.0` | Limiares para classificar como 🟢 excelente oportunidade |
+
+A planilha traz uma coluna "Categoria ML" (o `ml_domain_id` usado) e
+"Comissão (%)" (o percentual efetivamente aplicado naquela linha), para
+auditar qual taxa foi usada em cada produto.
 
 O relatório calcula, por produto: `lucro líquido = preço de venda -
 custo Amazon - comissão - custo fixo - frete - imposto`, `margem = lucro
