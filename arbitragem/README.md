@@ -141,7 +141,7 @@ nomes de campo em `parse_item()`.
 
 A página de "Mais vendidos" da Amazon não expõe marca/modelo/EAN de forma
 estruturada, então usamos o nível 3 do plano de identificação em camadas
-(título normalizado), com dois filtros para reduzir falsos positivos:
+(título normalizado), com três filtros para reduzir falsos positivos:
 
 1. **Score de similaridade**: sobreposição de palavras significativas entre
    o título da Amazon e o do anúncio do Mercado Livre (`--min-score`,
@@ -150,7 +150,19 @@ estruturada, então usamos o nível 3 do plano de identificação em camadas
    `capinha`, `case`, `suporte`, `kit`, `carregador` etc. quando essas
    palavras não aparecem também no título da Amazon — sem isso, uma
    "Capinha para Echo Dot" pode pontuar alto no score e ser confundida com
-   o produto em si.
+   o produto em si. Exceção: "kit" sozinho não desqualifica quando os dois
+   títulos confirmam a mesma quantidade (ver item 3) — senão um multipack
+   genuíno descrito como "Kit com 16 unidades" seria descartado à toa.
+3. **Filtro de quantidade**: quando os dois títulos mencionam
+   explicitamente uma quantidade de itens (ex.: "16 unidades"), anúncios
+   com quantidade diferente são descartados mesmo com score alto. Sem
+   isso, um pacote de 4 pilhas e um de 16 pilhas do mesmo fabricante têm
+   score de similaridade ~1.0 (só a palavra da quantidade muda) e seriam
+   tratados como o mesmo produto — problema real encontrado em teste com
+   dados reais (`Pilha Alcalina AAA com 16 unidades` batendo com um
+   anúncio de 4 unidades). Quando nenhum dos dois títulos menciona
+   quantidade, o filtro não se aplica — é uma limitação conhecida, não dá
+   pra confirmar quantidade nesse caso.
 
 Além disso, só considera anúncios com `condition == "new"` (produto novo,
 já que o objetivo é revenda) e remove outliers de preço pela regra do IQR

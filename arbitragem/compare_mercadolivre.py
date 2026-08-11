@@ -70,6 +70,10 @@ STOPWORDS = {
 # Dot"). Se aparecerem no título do Mercado Livre mas não no da Amazon, o
 # anúncio é descartado mesmo que o score de similaridade seja alto — o
 # score sozinho não distingue "Echo Dot" de "capinha para Echo Dot".
+# "kit" é tratado à parte em looks_like_accessory(): só desqualifica
+# quando não há confirmação de quantidade igual entre os títulos (ver
+# QUANTITY_RE) — do contrário, um multipack genuíno como "Kit com 16
+# unidades" seria descartado por engano.
 ACCESSORY_MARKERS = {
     "capa", "capinha", "pelicula", "case", "suporte", "adaptador",
     "carregador", "cabo", "skin", "adesivo", "protetor", "bolsa",
@@ -77,6 +81,17 @@ ACCESSORY_MARKERS = {
 }
 
 PRICE_RE = re.compile(r"[\d.,]+")
+
+# Detecta menção explícita a quantidade de itens no pacote (ex.: "16
+# unidades", "kit com 4", "pack 2"). Quando ambos os títulos mencionam uma
+# quantidade e elas são diferentes, o anúncio é descartado — sem isso, um
+# pacote de 4 pilhas pode pontuar 100% de match com um pacote de 16 só
+# porque as demais palavras do título são idênticas.
+QUANTITY_RE = re.compile(
+    r"(?:kit\s*(?:com|de)?\s*|pack\s*(?:com|de)?\s*|com\s*)?"
+    r"(\d+)\s*(?:unidades|unidade|unid\.?|uni\.?|un\.?|pe(?:c|ç)as?|pcs?\.?)\b",
+    re.IGNORECASE,
+)
 
 OUTPUT_FIELDNAMES = [
     "asin",
@@ -98,11 +113,15 @@ OUTPUT_FIELDNAMES = [
 
 def normalize(text: str) -> set[str]:
     """Remove acentos/pontuação e retorna o conjunto de palavras
-    significativas (ignora stopwords e palavras muito curtas)."""
+    significativas (ignora stopwords e palavras muito curtas). Números são
+    mantidos mesmo quando curtos (ex.: "16") — descartá-los pelo filtro de
+    tamanho fazia o score não enxergar diferença entre "16 unidades" e
+    "4 unidades", tratando pacotes de tamanhos diferentes como o mesmo
+    produto."""
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     text = text.lower()
     words = re.findall(r"[a-z0-9]+", text)
-    return {w for w in words if len(w) > 2 and w not in STOPWORDS}
+    return {w for w in words if (w.isdigit() or len(w) > 2) and w not in STOPWORDS}
 
 
 def build_query(title: str, max_words: int = 6) -> str:
@@ -136,9 +155,35 @@ def match_score(amazon_title: str, ml_title: str) -> float:
     return len(a & b) / min(len(a), len(b))
 
 
-def looks_like_accessory(amazon_words: set[str], ml_words: set[str]) -> bool:
+def extract_quantity(title: str) -> int | None:
+    """Extrai a quantidade de itens do pacote mencionada no título, se
+    houver (ex.: "com 16 unidades" -> 16). Retorna None quando o título
+    não menciona quantidade explicitamente."""
+    match = QUANTITY_RE.search(title)
+    return int(match.group(1)) if match else None
+
+
+def looks_like_accessory(amazon_title: str, ml_title: str, amazon_words: set[str], ml_words: set[str]) -> bool:
     extra_accessory_words = (ml_words & ACCESSORY_MARKERS) - amazon_words
-    return bool(extra_accessory_words)
+    if not extra_accessory_words:
+        return False
+    # "kit" sozinho não indica acessório quando os dois títulos confirmam
+    # explicitamente a mesma quantidade (ex.: "Kit com 16 unidades" e "com
+    # 16 unidades" são o mesmo multipack, não um kit de acessórios). Outras
+    # palavras da lista (capinha, case, suporte...) continuam desqualificando
+    # normalmente.
+    if extra_accessory_words == {"kit"}:
+        amazon_qty = extract_quantity(amazon_title)
+        ml_qty = extract_quantity(ml_title)
+        if amazon_qty is not None and ml_qty is not None and amazon_qty == ml_qty:
+            return False
+    return True
+
+
+def has_quantity_mismatch(amazon_title: str, ml_title: str) -> bool:
+    amazon_qty = extract_quantity(amazon_title)
+    ml_qty = extract_quantity(ml_title)
+    return amazon_qty is not None and ml_qty is not None and amazon_qty != ml_qty
 
 
 def parse_price_value(value) -> float | None:
@@ -252,7 +297,9 @@ def filter_and_score(amazon_title: str, results: list[dict], min_score: float) -
             continue
         ml_title = item.get("title", "")
         ml_words = normalize(ml_title)
-        if looks_like_accessory(amazon_words, ml_words):
+        if looks_like_accessory(amazon_title, ml_title, amazon_words, ml_words):
+            continue
+        if has_quantity_mismatch(amazon_title, ml_title):
             continue
         score = match_score(amazon_title, ml_title)
         if score < min_score:
