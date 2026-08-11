@@ -7,10 +7,21 @@ confiança razoável.
 
 A API pública de busca (/sites/MLB/search) está fechada para apps comuns
 de desenvolvedor: mesmo com um access_token válido, ela responde
-403 {"message":"forbidden"} (confirmado em teste real). Por isso, assim
-como fizemos com a Amazon, este script busca fazendo scraping da página
-pública de resultados do Mercado Livre — não precisa mais de client_id,
-client_secret nem access_token.
+403 {"message":"forbidden"} — problema confirmado em teste real e
+relatado por diversos desenvolvedores desde ago/2025, sem solução oficial
+do Mercado Livre até hoje. Por isso, assim como fizemos com a Amazon,
+este script busca fazendo scraping da página pública de resultados —
+não precisa mais de client_id, client_secret nem access_token.
+
+O Mercado Livre também aplica uma triagem antibot que pode redirecionar
+sessões "sem histórico" (cookies zerados, indo direto para um link
+profundo) para uma tela de verificação de conta. Para reduzir a chance
+disso acontecer, o script usa um perfil de navegador persistente (cookies
+salvos entre execuções, em .ml_browser_profile/) e visita a página
+inicial antes de ir para a busca, imitando uma navegação mais natural.
+Isso não é garantia — se o Mercado Livre insistir em pedir login mesmo
+assim, não há solução sem autenticar com uma conta de verdade, o que traz
+risco real de restrição na conta e exige uma decisão separada.
 
 Como a página de "Mais vendidos" da Amazon não expõe marca/modelo/EAN de
 forma estruturada, o matching usado aqui é por título normalizado (nível 3
@@ -38,11 +49,14 @@ import re
 import statistics
 import time
 import unicodedata
+from pathlib import Path
 from urllib.parse import quote
 
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
+from playwright.sync_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
+HOME_URL = "https://www.mercadolivre.com.br/"
 SEARCH_URL_TEMPLATE = "https://lista.mercadolivre.com.br/{query}"
+PROFILE_DIR = Path(__file__).resolve().parent / ".ml_browser_profile"
 
 STOPWORDS = {
     "de", "da", "do", "das", "dos", "com", "para", "e", "ou", "um", "uma",
@@ -71,7 +85,17 @@ LINK_SELECTOR = "a.ui-search-link, a.ui-search-item__group__element, a.poly-comp
 
 PRICE_RE = re.compile(r"[\d.,]+")
 PRICE_TEXT_RE = re.compile(r"R\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})?")
-CAPTCHA_MARKERS = ("Confirme que você não é um robô", "captcha", "Acesso bloqueado")
+
+# Sinais de que o Mercado Livre interceptou a navegação com uma triagem
+# antibot em vez de mostrar a página pedida — seja um CAPTCHA, seja a
+# tela "/gz/account-verification" pedindo login antes de continuar.
+BLOCK_MARKERS = (
+    "Confirme que você não é um robô",
+    "captcha",
+    "Acesso bloqueado",
+    "account-verification",
+    "Para continuar, acesse sua conta",
+)
 
 OUTPUT_FIELDNAMES = [
     "asin",
@@ -196,19 +220,48 @@ def extract_item(card) -> dict | None:
     }
 
 
+class BlockedError(RuntimeError):
+    """O Mercado Livre interceptou a navegação com uma triagem antibot
+    (CAPTCHA ou tela de verificação de conta) em vez de mostrar a busca."""
+
+
+def warm_up(context: BrowserContext) -> Page:
+    """Visita a home antes de qualquer busca, para que a sessão pareça uma
+    navegação normal em vez de um cliente indo direto a um link profundo
+    sem nenhum histórico — um dos sinais que a triagem antibot considera."""
+    page = context.pages[0] if context.pages else context.new_page()
+    context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+    try:
+        page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30_000)
+        page.wait_for_timeout(1500)
+        for label in ("Aceitar", "Aceitar cookies", "Concordo"):
+            locator = page.get_by_text(label, exact=False)
+            if locator.count() > 0:
+                locator.first.click(timeout=3000)
+                break
+    except Exception as exc:
+        print(f"Aviso: aquecimento da sessão falhou ({exc}); seguindo mesmo assim.")
+    return page
+
+
+def check_blocked(page: Page) -> None:
+    content = page.content()
+    if any(marker.lower() in content.lower() for marker in BLOCK_MARKERS):
+        raise BlockedError(
+            f"Mercado Livre interceptou a navegação com uma triagem antibot em {page.url}"
+        )
+
+
 def search_mercadolivre(page: Page, query: str, limit: int = 50) -> list[dict]:
     url = SEARCH_URL_TEMPLATE.format(query=quote(query.replace(" ", "-")))
+    page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+
+    check_blocked(page)
 
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=30_000)
         page.wait_for_selector(CARD_SELECTOR, timeout=15_000)
     except PlaywrightTimeoutError:
         # Pode ser página sem resultados, ou a estrutura do site mudou.
-        return []
-
-    content = page.content()
-    if any(marker.lower() in content.lower() for marker in CAPTCHA_MARKERS):
-        print("  Aviso: possível bloqueio/CAPTCHA do Mercado Livre; pulando esta busca.")
         return []
 
     cards = page.query_selector_all(CARD_SELECTOR)
@@ -271,6 +324,8 @@ def compare_product(
 
     try:
         results = search_mercadolivre(page, query)
+    except BlockedError:
+        raise
     except Exception as exc:
         print(f"  Erro na busca: {exc}")
         results = []
@@ -334,19 +389,27 @@ def main() -> None:
     with open(args.input_csv, encoding="utf-8-sig") as f:
         amazon_products = list(csv.DictReader(f))
 
+    PROFILE_DIR.mkdir(exist_ok=True)
+
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=not args.headed)
-        context = browser.new_context(
+        # Perfil persistente (cookies salvos entre execuções em
+        # .ml_browser_profile/) para a sessão parecer um navegador que já
+        # visitou o site antes, em vez de um cliente anônimo toda vez.
+        context = pw.chromium.launch_persistent_context(
+            str(PROFILE_DIR),
+            headless=not args.headed,
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             ),
             locale="pt-BR",
+            timezone_id="America/Sao_Paulo",
+            viewport={"width": 1366, "height": 768},
         )
-        page = context.new_page()
 
         rows = []
         try:
+            page = warm_up(context)
             for product in amazon_products:
                 row = compare_product(
                     page,
@@ -358,8 +421,16 @@ def main() -> None:
                     args.delay,
                 )
                 rows.append(row)
+        except BlockedError as exc:
+            raise SystemExit(
+                f"\n{exc}\n\n"
+                "O Mercado Livre pediu login antes de mostrar a busca, mesmo com "
+                "sessão aquecida. Resultados parciais (se houver) não foram salvos. "
+                "Rode de novo mais tarde, ou com --headed para ver o que está "
+                "acontecendo na tela."
+            ) from None
         finally:
-            browser.close()
+            context.close()
 
     with open(args.output, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=OUTPUT_FIELDNAMES)

@@ -134,7 +134,32 @@ match (`ml_best_match_title/score/url`) e a diferença bruta em relação ao
 preço da Amazon (`diff_avg_vs_amazon`, `diff_avg_pct`) — ainda sem
 descontar comissão, frete ou impostos.
 
-### Avisos importantes
+### Triagem antibot / tela de verificação de conta
+
+O Mercado Livre pode redirecionar sessões que parecem automatizadas (sem
+cookies, indo direto a um link profundo) para uma tela
+`/gz/account-verification` pedindo login antes de mostrar a busca — não é
+um CAPTCHA, é um pedido de autenticação mesmo. Para reduzir a chance
+disso:
+
+- O script mantém um **perfil de navegador persistente** em
+  `arbitragem/.ml_browser_profile/` (cookies salvos entre execuções, git-
+  ignorado) em vez de abrir uma sessão anônima do zero a cada vez.
+- Antes de qualquer busca, ele visita a página inicial do Mercado Livre
+  (`warm_up()`) e tenta fechar o banner de cookies, simulando uma
+  navegação mais parecida com a de uma pessoa.
+
+Isso reduz a chance de bloqueio, mas **não elimina**: a triagem do
+Mercado Livre é uma heurística deles, fora do nosso controle. Se mesmo
+assim aparecer a tela de verificação, o script detecta isso
+(`BlockedError`) e para a execução com uma mensagem clara, em vez de
+retornar silenciosamente 0 resultados para tudo (como acontecia antes).
+Nesse caso, rodar de novo mais tarde costuma ajudar; se for recorrente,
+a única forma de contornar de verdade seria autenticar com uma conta real
+do Mercado Livre — o que traz risco de restrição na conta e não deve ser
+feito sem decidir isso conscientemente antes.
+
+### Outros avisos importantes
 
 - Assim como no scraper da Amazon, o HTML do Mercado Livre muda com
   frequência; os seletores usam fallbacks (`CARD_SELECTOR`,
@@ -144,8 +169,8 @@ descontar comissão, frete ou impostos.
   no texto do card — o Mercado Livre normalmente só rotula anúncios
   usados explicitamente. É uma heurística simples, não uma leitura
   estruturada do campo `condition`.
-- O script não tenta contornar CAPTCHA ou bloqueio; se detectado, a busca
-  daquele produto é pulada e o restante continua.
+- O script não tenta contornar CAPTCHA; se detectado, a execução para
+  (veja seção acima).
 
 ## Próximos passos (fora do escopo deste MVP)
 
