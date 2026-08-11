@@ -5,38 +5,44 @@ preço mínimo/médio/máximo. Ainda não calcula lucro/ROI (isso é o MVP-03) �
 o objetivo aqui é só validar se conseguimos encontrar o "mesmo produto" com
 confiança razoável.
 
+A API pública de busca (/sites/MLB/search) está fechada para apps comuns
+de desenvolvedor: mesmo com um access_token válido, ela responde
+403 {"message":"forbidden"} (confirmado em teste real). Por isso, assim
+como fizemos com a Amazon, este script busca fazendo scraping da página
+pública de resultados do Mercado Livre — não precisa mais de client_id,
+client_secret nem access_token.
+
 Como a página de "Mais vendidos" da Amazon não expõe marca/modelo/EAN de
 forma estruturada, o matching usado aqui é por título normalizado (nível 3
 do plano de identificação em camadas): compara o conjunto de palavras
 significativas do título da Amazon com o de cada resultado do Mercado
-Livre e descarta os que têm pouca sobreposição.
+Livre e descarta os que têm pouca sobreposição, além de descartar
+anúncios que parecem ser acessórios/kits em vez do produto em si.
 
-Dependência: requests (pip install requests)
+Dependência: playwright (mesma já usada em scrape_to_csv.py)
+    pip install playwright
+    playwright install chromium
 
 Uso:
     python compare_mercadolivre.py produtos.csv
     python compare_mercadolivre.py produtos.csv --output comparacao.csv
     python compare_mercadolivre.py produtos.csv --min-score 0.6 --delay 1.5
-
-Autenticação:
-    A busca é tentada primeiro sem token (vários endpoints públicos do
-    Mercado Livre ainda funcionam assim). Se a API responder 401, configure
-    a variável de ambiente ML_ACCESS_TOKEN — veja instruções no README.md.
+    python compare_mercadolivre.py produtos.csv --headed
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import os
 import re
 import statistics
 import time
 import unicodedata
+from urllib.parse import quote
 
-import requests
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
-ML_SEARCH_URL = "https://api.mercadolibre.com/sites/MLB/search"
+SEARCH_URL_TEMPLATE = "https://lista.mercadolivre.com.br/{query}"
 
 STOPWORDS = {
     "de", "da", "do", "das", "dos", "com", "para", "e", "ou", "um", "uma",
@@ -54,6 +60,18 @@ ACCESSORY_MARKERS = {
     "carregador", "cabo", "skin", "adesivo", "protetor", "bolsa",
     "compativel", "compatible", "peca", "reposicao", "acessorio", "kit",
 }
+
+# Seletores conhecidos dos cards de resultado. O Mercado Livre já usou (e
+# ainda mistura, dependendo da categoria/experimento) tanto a marcação
+# "ui-search-*" mais antiga quanto a mais nova "poly-*". Mantemos os dois
+# como fallback, igual fizemos com a Amazon.
+CARD_SELECTOR = "li.ui-search-layout__item, div.ui-search-result__wrapper, div.poly-card, div[class*='poly-card']"
+TITLE_SELECTOR = "h2.ui-search-item__title, .ui-search-item__title, h3.poly-component__title, a.poly-component__title, [class*='poly-component__title']"
+LINK_SELECTOR = "a.ui-search-link, a.ui-search-item__group__element, a.poly-component__title, a[href*='mercadolivre.com.br'], a[href*='/MLB-']"
+
+PRICE_RE = re.compile(r"[\d.,]+")
+PRICE_TEXT_RE = re.compile(r"R\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})?")
+CAPTCHA_MARKERS = ("Confirme que você não é um robô", "captcha", "Acesso bloqueado")
 
 OUTPUT_FIELDNAMES = [
     "asin",
@@ -113,28 +131,97 @@ def match_score(amazon_title: str, ml_title: str) -> float:
     return len(a & b) / min(len(a), len(b))
 
 
-class AuthRequiredError(RuntimeError):
-    """A API do Mercado Livre exige um token de acesso para esta busca."""
-
-
-def search_mercadolivre(query: str, token: str | None, limit: int = 50) -> list[dict]:
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    params = {"q": query, "limit": limit}
-    resp = requests.get(ML_SEARCH_URL, params=params, headers=headers, timeout=15)
-    if resp.status_code in (401, 403):
-        raise AuthRequiredError(
-            f"Mercado Livre respondeu {resp.status_code} — a busca pública exige "
-            "autenticação. Configure a variável de ambiente ML_ACCESS_TOKEN com um "
-            "token de aplicativo (veja README.md, seção 'Autenticação na API do "
-            "Mercado Livre')."
-        )
-    resp.raise_for_status()
-    return resp.json().get("results", [])
-
-
 def looks_like_accessory(amazon_words: set[str], ml_words: set[str]) -> bool:
     extra_accessory_words = (ml_words & ACCESSORY_MARKERS) - amazon_words
     return bool(extra_accessory_words)
+
+
+def parse_price_text(text: str | None) -> float | None:
+    if not text:
+        return None
+    match = PRICE_RE.search(text)
+    if not match:
+        return None
+    normalized = match.group(0).replace(".", "").replace(",", ".")
+    try:
+        return float(normalized)
+    except ValueError:
+        return None
+
+
+def extract_price(card) -> float | None:
+    """O preço do Mercado Livre normalmente vem em dois spans separados
+    (parte inteira e centavos, ex.: 'andes-money-amount__fraction' = '149'
+    e 'andes-money-amount__cents' = '90'). Se essa estrutura não bater,
+    cai para uma busca por regex de 'R$ 149,90' em todo o texto do card —
+    o mesmo fallback que já usamos no scraper da Amazon."""
+    fraction_el = card.query_selector("[class*='andes-money-amount__fraction']")
+    if fraction_el:
+        cents_el = card.query_selector("[class*='andes-money-amount__cents']")
+        fraction = fraction_el.inner_text().strip()
+        cents = cents_el.inner_text().strip() if cents_el else "00"
+        price = parse_price_text(f"{fraction},{cents}")
+        if price is not None:
+            return price
+
+    match = PRICE_TEXT_RE.search(card.inner_text())
+    return parse_price_text(match.group(0)) if match else None
+
+
+def extract_condition(card) -> str:
+    """O Mercado Livre normalmente só exibe uma etiqueta explícita para
+    anúncios usados; produtos novos costumam vir sem essa marcação. É uma
+    heurística simples — pode errar em títulos que mencionem 'usado' por
+    outro motivo, mas é razoável para o MVP."""
+    text = card.inner_text().lower()
+    return "used" if "usado" in text else "new"
+
+
+def extract_item(card) -> dict | None:
+    title_el = card.query_selector(TITLE_SELECTOR)
+    link_el = card.query_selector(LINK_SELECTOR)
+    if title_el is None or link_el is None:
+        return None
+
+    title = title_el.inner_text().strip()
+    url = link_el.get_attribute("href")
+    if not title or not url:
+        return None
+
+    return {
+        "title": title,
+        "permalink": url,
+        "price": extract_price(card),
+        "condition": extract_condition(card),
+    }
+
+
+def search_mercadolivre(page: Page, query: str, limit: int = 50) -> list[dict]:
+    url = SEARCH_URL_TEMPLATE.format(query=quote(query.replace(" ", "-")))
+
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        page.wait_for_selector(CARD_SELECTOR, timeout=15_000)
+    except PlaywrightTimeoutError:
+        # Pode ser página sem resultados, ou a estrutura do site mudou.
+        return []
+
+    content = page.content()
+    if any(marker.lower() in content.lower() for marker in CAPTCHA_MARKERS):
+        print("  Aviso: possível bloqueio/CAPTCHA do Mercado Livre; pulando esta busca.")
+        return []
+
+    cards = page.query_selector_all(CARD_SELECTOR)
+    results = []
+    for card in cards[:limit]:
+        try:
+            item = extract_item(card)
+        except Exception as exc:
+            print(f"  Aviso: falha ao ler um card ({exc})")
+            continue
+        if item:
+            results.append(item)
+    return results
 
 
 def filter_and_score(amazon_title: str, results: list[dict], min_score: float) -> list[dict]:
@@ -171,11 +258,11 @@ def remove_price_outliers(prices: list[float]) -> list[float]:
 
 
 def compare_product(
+    page: Page,
     asin: str,
     amazon_title: str,
     amazon_price: str,
     amazon_url: str,
-    token: str | None,
     min_score: float,
     delay: float,
 ) -> dict:
@@ -183,9 +270,7 @@ def compare_product(
     print(f"Buscando no Mercado Livre: '{query}'")
 
     try:
-        results = search_mercadolivre(query, token)
-    except AuthRequiredError:
-        raise
+        results = search_mercadolivre(page, query)
     except Exception as exc:
         print(f"  Erro na busca: {exc}")
         results = []
@@ -242,36 +327,39 @@ def main() -> None:
     parser.add_argument("input_csv", help="CSV gerado por scrape_to_csv.py")
     parser.add_argument("--output", default="comparacao.csv", help="Caminho do CSV de saída")
     parser.add_argument("--min-score", type=float, default=0.5, help="Score mínimo de matching (0 a 1, padrão 0.5)")
-    parser.add_argument("--delay", type=float, default=1.0, help="Segundos entre buscas (padrão 1.0)")
+    parser.add_argument("--delay", type=float, default=2.0, help="Segundos entre buscas (padrão 2.0)")
+    parser.add_argument("--headed", action="store_true", help="Abre o navegador visível (útil para depurar)")
     args = parser.parse_args()
-
-    token = os.getenv("ML_ACCESS_TOKEN")
-    if not token:
-        print("Aviso: ML_ACCESS_TOKEN não configurado; tentando buscar sem autenticação.\n")
-
-    try:
-        search_mercadolivre("teste", token, limit=1)
-    except AuthRequiredError as exc:
-        raise SystemExit(f"\n{exc}") from None
 
     with open(args.input_csv, encoding="utf-8-sig") as f:
         amazon_products = list(csv.DictReader(f))
 
-    rows = []
-    for product in amazon_products:
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=not args.headed)
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            locale="pt-BR",
+        )
+        page = context.new_page()
+
+        rows = []
         try:
-            row = compare_product(
-                product["asin"],
-                product["title"],
-                product.get("price", ""),
-                product["url"],
-                token,
-                args.min_score,
-                args.delay,
-            )
-        except AuthRequiredError as exc:
-            raise SystemExit(f"\n{exc}") from None
-        rows.append(row)
+            for product in amazon_products:
+                row = compare_product(
+                    page,
+                    product["asin"],
+                    product["title"],
+                    product.get("price", ""),
+                    product["url"],
+                    args.min_score,
+                    args.delay,
+                )
+                rows.append(row)
+        finally:
+            browser.close()
 
     with open(args.output, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=OUTPUT_FIELDNAMES)

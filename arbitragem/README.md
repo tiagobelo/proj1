@@ -85,9 +85,18 @@ adicionar uma categoria não exige alteração de código.
 
 [`compare_mercadolivre.py`](compare_mercadolivre.py) lê o CSV gerado pelo
 `scrape_to_csv.py`, busca cada produto no Mercado Livre (site `MLB` —
-Brasil) via API pública e calcula preço mínimo/médio/máximo dos anúncios
-que provavelmente são o mesmo produto. Ainda **não** calcula lucro/ROI —
-isso é o MVP-03.
+Brasil) e calcula preço mínimo/médio/máximo dos anúncios que provavelmente
+são o mesmo produto. Ainda **não** calcula lucro/ROI — isso é o MVP-03.
+
+**A busca é feita por scraping da página pública de resultados, não pela
+API.** Testamos a API oficial (`/sites/MLB/search`) e, mesmo com um
+`access_token` válido gerado via OAuth, ela responde
+`403 {"message":"forbidden"}` — o endpoint está fechado para apps comuns
+de desenvolvedor, só disponível para integradores certificados. Como isso
+é essencialmente o mesmo bloqueio que já tínhamos identificado do lado da
+Amazon (Creators API exige aprovação prévia), seguimos a mesma solução:
+scraping da página pública, sem precisar de `client_id`/`client_secret`/
+`access_token`.
 
 ### Como funciona o matching
 
@@ -111,10 +120,12 @@ antes de calcular a média.
 ### Como rodar
 
 ```bash
-pip install requests   # já incluso em requirements.txt
+pip install -r requirements.txt   # playwright já usado no MVP-01
+playwright install chromium       # se ainda não tiver rodado
 
 python compare_mercadolivre.py produtos.csv
 python compare_mercadolivre.py produtos.csv --output comparacao.csv --min-score 0.6
+python compare_mercadolivre.py produtos.csv --headed   # navegador visível, útil para depurar
 ```
 
 O CSV de saída traz, por produto: `ml_listing_count`, `ml_min_price`,
@@ -123,34 +134,18 @@ match (`ml_best_match_title/score/url`) e a diferença bruta em relação ao
 preço da Amazon (`diff_avg_vs_amazon`, `diff_avg_pct`) — ainda sem
 descontar comissão, frete ou impostos.
 
-### Autenticação na API do Mercado Livre
+### Avisos importantes
 
-**Confirmado na prática: a busca (`/sites/MLB/search`) exige token — sem
-`ML_ACCESS_TOKEN` a API responde `403 Forbidden`.** O script faz uma
-verificação antes de processar o CSV inteiro e já para com a mensagem
-abaixo se faltar autenticação, em vez de repetir o erro produto a produto.
-
-Para gerar o token, crie um app gratuito (não exige aprovação, ao
-contrário da Amazon Associates):
-
-1. Acesse https://developers.mercadolivre.com.br/devcenter e crie uma
-   aplicação (`client_id`, `client_secret`, qualquer `Redirect URI` válida
-   — não precisa estar no ar).
-2. Autorize o app abrindo no navegador (logado com sua conta ML):
-   `https://auth.mercadolivre.com.br/authorization?response_type=code&client_id=SEU_CLIENT_ID&redirect_uri=SUA_REDIRECT_URI`
-   e copie o parâmetro `code` da URL de retorno.
-3. Troque o `code` por um token:
-   ```bash
-   curl -X POST https://api.mercadolibre.com/oauth/token \
-     -H "accept: application/json" \
-     -H "content-type: application/x-www-form-urlencoded" \
-     -d "grant_type=authorization_code&client_id=SEU_CLIENT_ID&client_secret=SEU_CLIENT_SECRET&code=CODE_OBTIDO&redirect_uri=SUA_REDIRECT_URI"
-   ```
-4. A resposta traz `access_token` (válido ~6h) e `refresh_token` (para
-   renovar depois sem repetir o login). Exporte antes de rodar o script:
-   ```powershell
-   $env:ML_ACCESS_TOKEN="seu_access_token"
-   ```
+- Assim como no scraper da Amazon, o HTML do Mercado Livre muda com
+  frequência; os seletores usam fallbacks (`CARD_SELECTOR`,
+  `TITLE_SELECTOR`, `LINK_SELECTOR` em `compare_mercadolivre.py`), mas
+  ainda exigem manutenção periódica.
+- A condição "novo"/"usado" é inferida pela presença da palavra "usado"
+  no texto do card — o Mercado Livre normalmente só rotula anúncios
+  usados explicitamente. É uma heurística simples, não uma leitura
+  estruturada do campo `condition`.
+- O script não tenta contornar CAPTCHA ou bloqueio; se detectado, a busca
+  daquele produto é pulada e o restante continua.
 
 ## Próximos passos (fora do escopo deste MVP)
 
