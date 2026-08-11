@@ -261,8 +261,66 @@ descontar comissão, frete ou impostos.
   créditos), o script registra o erro no console e segue para o próximo
   produto em vez de travar a execução inteira.
 
+## MVP-03 — Relatório de oportunidades (XLSX)
+
+[`generate_report.py`](generate_report.py) lê o CSV gerado pelo
+`compare_mercadolivre.py` e gera uma planilha XLSX com lucro estimado,
+margem, ROI e uma classificação (🟢 excelente / 🟡 moderada / 🔴 não
+recomendada) por produto — a etapa final que transforma os dados brutos
+em decisão de compra. Não usa banco de dados: todo o pipeline roda em
+cima de arquivos (`scrape_to_csv.py` → `compare_mercadolivre.py` →
+`generate_report.py`).
+
+### Sobre as taxas do Mercado Livre
+
+A partir de mar/2026 o Mercado Livre passou a calcular o custo
+operacional por **peso e dimensão** do produto em vez de uma taxa fixa
+simples por faixa de preço, e a comissão varia por categoria (10-14% no
+anúncio clássico, 15-19% no premium). Como este pipeline não coleta
+peso/dimensão de nenhum dos dois marketplaces, os valores usados no
+relatório são **estimativas configuráveis por linha de comando** — não
+valores exatos. Confirme os números reais no Simulador de Custos oficial
+(dentro do Seller Center) antes de decidir uma compra:
+https://www.mercadolivre.com.br/ajuda/formas-de-pagamento/custos
+
+### Como rodar
+
+```bash
+pip install -r requirements.txt   # inclui openpyxl
+
+python generate_report.py comparacao.csv
+python generate_report.py comparacao.csv --output oportunidades.xlsx \
+  --commission-pct 12 --fixed-fee 6 --shipping-cost 15 --tax-pct 4 \
+  --min-margin-pct 15 --min-roi-pct 20
+```
+
+Parâmetros (todos opcionais, com padrão):
+
+| Parâmetro | Padrão | Significado |
+|---|---|---|
+| `--price-basis` | `median` | Qual preço do Mercado Livre usar como venda esperada (`median`/`avg`/`min`) — mediana é mais resistente a outliers que a média |
+| `--commission-pct` | `12.0` | Comissão do Mercado Livre em % |
+| `--fixed-fee` | `6.0` | Custo fixo estimado em R$ por venda |
+| `--shipping-cost` | `0.0` | Frete estimado em R$ que o vendedor absorve — script avisa se ficar em 0 |
+| `--tax-pct` | `0.0` | Imposto sobre a venda em % (depende do seu regime tributário) |
+| `--min-margin-pct` / `--min-roi-pct` | `15.0` / `20.0` | Limiares para classificar como 🟢 excelente oportunidade |
+
+O relatório calcula, por produto: `lucro líquido = preço de venda -
+custo Amazon - comissão - custo fixo - frete - imposto`, `margem = lucro
+/ preço de venda`, `ROI = lucro / custo`. Produtos sem nenhum match no
+Mercado Livre (`ml_listing_count = 0`) aparecem como ⚪ "sem dados
+suficientes", sem travar o relatório.
+
+**Um resultado com tudo vermelho não é necessariamente um bug do
+script** — em teste real, um produto com diferença bruta de +19,6% entre
+Amazon e Mercado Livre virou prejuízo depois de somar comissão (12%),
+custo fixo (R$6) e frete (R$15): a comissão sozinha sobre um preço de
+venda alto pode superar toda a margem bruta aparente. É exatamente esse
+tipo de alerta que o relatório existe para dar antes da compra.
+
 ## Próximos passos (fora do escopo deste MVP)
 
-- **MVP-03**: calculadora de arbitragem (lucro, ROI, Opportunity Score) e
-  dashboard de oportunidades, descontando comissão do Mercado Livre, frete
-  e impostos sobre `ml_avg_price`.
+- Refinamentos adicionais de matching conforme aparecerem em categorias
+  novas (ver limitações documentadas na seção de matching acima).
+- Eventual dashboard/interface além da planilha XLSX, se o volume de
+  produtos testados crescer o suficiente para justificar.
