@@ -341,7 +341,9 @@ margem, ROI e uma classificação (🟢 excelente / 🟡 moderada / 🔴 não
 recomendada) por produto — a etapa final que transforma os dados brutos
 em decisão de compra. Não usa banco de dados: todo o pipeline roda em
 cima de arquivos (`amazon_scrape_to_csv.py` → `compare_mercadolivre.py` →
-`generate_report.py`).
+`generate_report.py`). Veja também [`generate_pdf_report.py`](#mvp-03b--pdf-para-sellersclientes)
+logo abaixo, para gerar um PDF apresentável só com os produtos
+excelentes, pronto para enviar a terceiros.
 
 ### Sobre as taxas do Mercado Livre
 
@@ -427,6 +429,51 @@ Amazon e Mercado Livre virou prejuízo depois de somar comissão (12%),
 custo fixo (R$6) e frete (R$15): a comissão sozinha sobre um preço de
 venda alto pode superar toda a margem bruta aparente. É exatamente esse
 tipo de alerta que o relatório existe para dar antes da compra.
+
+## MVP-03b — PDF para sellers/clientes
+
+[`generate_pdf_report.py`](generate_pdf_report.py) lê o mesmo CSV e usa
+os mesmos parâmetros de custo do `generate_report.py` (reaproveita
+`compute_opportunities()` de lá, então os dois relatórios nunca
+divergem), mas gera um **PDF apresentável, com só os produtos 🟢
+"excelente oportunidade"** — pensado para ser enviado a sellers/clientes
+interessados em revender, não para uso interno.
+
+Cada produto vira um card com preço de custo (Amazon), preço de venda
+esperado (Mercado Livre), lucro estimado, margem, ROI, comissão, custo
+fixo e frete aplicados, e links diretos para o anúncio na Amazon e no
+Mercado Livre. Os cards vêm ordenados por margem (do melhor para o
+pior). Se nenhum produto for classificado como excelente na rodada, o
+PDF é gerado mesmo assim, com uma mensagem explicando isso — nunca falha
+silenciosamente nem manda um PDF vazio sem explicação.
+
+O PDF traz, logo no topo, um **aviso de que o custo fixo e o frete usados
+são estimativas configuráveis** (não os valores exatos que o Mercado
+Livre vai cobrar — ver nota sobre mar/2026 acima) e que os valores reais
+devem ser confirmados no Simulador de Custos antes de qualquer decisão
+de compra/revenda. O mesmo aviso, resumido, é repetido no rodapé de
+todas as páginas, já que este é um documento que pode ser encaminhado
+adiante e nem sempre é lido do início ao fim.
+
+### Como rodar
+
+```bash
+pip install -r requirements.txt   # inclui reportlab
+
+python generate_pdf_report.py comparacao.csv
+python generate_pdf_report.py comparacao.csv --output top_oportunidades.pdf --shipping-cost 15
+python generate_pdf_report.py comparacao.csv --min-margin-pct 20 --min-roi-pct 25 \
+  --title "Oportunidades de Revenda — Semana 32"
+```
+
+Aceita os mesmos parâmetros de custo do `generate_report.py`
+(`--commission-pct`, `--fees-config`, `--fixed-fee`,
+`--fixed-fee-config`, `--shipping-cost`, `--tax-pct`,
+`--min-margin-pct`, `--min-roi-pct`) — rode os dois scripts com os
+mesmos argumentos para o XLSX (uso interno, todas as classificações) e o
+PDF (uso externo, só os excelentes) baterem entre si. `--title`
+personaliza o texto do topo do PDF (por padrão "Oportunidades de Revenda
+— Amazon → Mercado Livre").
 
 ## Próximos passos (fora do escopo deste MVP)
 

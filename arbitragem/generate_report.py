@@ -6,6 +6,11 @@ partir do CSV produzido por compare_mercadolivre.py.
 Não usa banco de dados: o pipeline inteiro roda em cima de arquivos
 CSV/XLSX (amazon_scrape_to_csv.py -> compare_mercadolivre.py -> generate_report.py).
 
+Para um PDF apresentável com só os produtos 🟢 "excelente", pronto para
+enviar a sellers/clientes, use generate_pdf_report.py (mesmo CSV de
+entrada e mesmos parâmetros de custo, reaproveita compute_opportunities()
+deste arquivo para nunca divergir do XLSX).
+
 IMPORTANTE sobre as taxas do Mercado Livre: a partir de mar/2026 o custo
 operacional passou a ser calculado por peso/dimensão do produto em vez de
 uma taxa fixa simples, e a comissão varia por categoria (10-14% no
@@ -233,6 +238,40 @@ def calculate_opportunity(
     return result
 
 
+def compute_opportunities(
+    rows: list[dict],
+    price_basis: str,
+    fees_config: dict,
+    fixed_fee_tiers: list[dict],
+    commission_override: float | None,
+    fixed_fee_override: float | None,
+    shipping_cost: float,
+    tax_pct: float,
+    min_margin_pct: float,
+    min_roi_pct: float,
+) -> list[dict]:
+    """Calcula a lista de oportunidades a partir das linhas do CSV.
+
+    Compartilhado entre generate_report.py (XLSX) e generate_pdf_report.py
+    (PDF para terceiros) para os dois nunca divergirem na lógica de custo/
+    lucro — qualquer ajuste na fórmula entra aqui uma única vez.
+    """
+    return [
+        calculate_opportunity(
+            row,
+            price_basis,
+            resolve_commission_pct(row.get("ml_domain_id", ""), fees_config, commission_override),
+            fixed_fee_tiers,
+            fixed_fee_override,
+            shipping_cost,
+            tax_pct,
+            min_margin_pct,
+            min_roi_pct,
+        )
+        for row in rows
+    ]
+
+
 def build_workbook(opportunities: list[dict]) -> Workbook:
     wb = Workbook()
     ws = wb.active
@@ -312,20 +351,18 @@ def main() -> None:
     with open(args.input_csv, encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
 
-    opportunities = [
-        calculate_opportunity(
-            row,
-            args.price_basis,
-            resolve_commission_pct(row.get("ml_domain_id", ""), fees_config, args.commission_pct),
-            fixed_fee_tiers,
-            args.fixed_fee,
-            args.shipping_cost,
-            args.tax_pct,
-            args.min_margin_pct,
-            args.min_roi_pct,
-        )
-        for row in rows
-    ]
+    opportunities = compute_opportunities(
+        rows,
+        args.price_basis,
+        fees_config,
+        fixed_fee_tiers,
+        args.commission_pct,
+        args.fixed_fee,
+        args.shipping_cost,
+        args.tax_pct,
+        args.min_margin_pct,
+        args.min_roi_pct,
+    )
 
     wb = build_workbook(opportunities)
     wb.save(args.output)
