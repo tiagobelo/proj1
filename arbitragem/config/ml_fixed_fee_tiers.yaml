@@ -1,0 +1,39 @@
+# Custo fixo do Mercado Livre por faixa de PREÇO DE VENDA do anúncio,
+# usado por generate_report.py quando --fixed-fee NÃO é informado na
+# linha de comando. Passar --fixed-fee continua aplicando um valor único
+# fixo para todas as linhas (comportamento antigo, ignora este arquivo).
+#
+# IMPORTANTE: a partir de mar/2026 o Mercado Livre passou a calcular esse
+# custo por PESO/DIMENSÃO do produto, não mais só por faixa de preço — e
+# este pipeline não coleta peso/dimensão de nenhum dos dois marketplaces
+# (só preço). Uma tabela por faixa de preço é a melhor aproximação
+# possível com os dados que já coletamos, mas é uma ESTIMATIVA, não o
+# valor exato que o Mercado Livre vai cobrar.
+#
+# Este arquivo vem vazio de propósito: eu não tenho como confirmar os
+# valores reais das faixas (não tenho acesso à Amazon nem ao Mercado
+# Livre neste ambiente). Preencha `tiers` com os valores do Simulador de
+# Custos oficial (dentro do Seller Center), testando ali alguns preços
+# típicos dos seus produtos:
+# https://www.mercadolivre.com.br/ajuda/formas-de-pagamento/custos
+#
+# Formato: lista ordenada por preço crescente. `up_to` é o teto de preço
+# de venda (inclusive) da faixa; a última faixa deve ter `up_to: null`
+# para cobrir "daqui pra cima" (normalmente 0, já que preços altos costumam
+# não ter custo fixo, só comissão — confirme isso também no simulador).
+# Exemplo (valores fictícios, NÃO use sem confirmar):
+#
+# tiers:
+#   - up_to: 29.00
+#     fee: 6.00
+#   - up_to: 50.00
+#     fee: 5.00
+#   - up_to: 79.00
+#     fee: 4.00
+#   - up_to: null
+#     fee: 0.00
+#
+# Enquanto `tiers` estiver vazio (ou o arquivo não existir), o script cai
+# no valor único de --fixed-fee (padrão R$ 6,00) para todas as linhas,
+# igual ao comportamento anterior.
+tiers: []

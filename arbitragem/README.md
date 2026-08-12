@@ -350,14 +350,14 @@ operacional por **peso e dimensão** do produto em vez de uma taxa fixa
 simples por faixa de preço, e a comissão varia por categoria (10-14% no
 anúncio clássico, 15-19% no premium). Como este pipeline não coleta
 peso/dimensão de nenhum dos dois marketplaces, o custo fixo/frete/imposto
-usados no relatório continuam sendo **estimativas configuráveis por
-linha de comando** — não valores exatos. Confirme os números reais no
-Simulador de Custos oficial (dentro do Seller Center) antes de decidir
-uma compra: https://www.mercadolivre.com.br/ajuda/formas-de-pagamento/custos
+usados no relatório continuam sendo **estimativas configuráveis** — não
+valores exatos. Confirme os números reais no Simulador de Custos oficial
+(dentro do Seller Center) antes de decidir uma compra:
+https://www.mercadolivre.com.br/ajuda/formas-de-pagamento/custos
 
-A **comissão**, diferente dos demais custos, é escolhida automaticamente
-por categoria: `generate_report.py` lê `ml_domain_id` do CSV (capturado
-pelo `compare_mercadolivre.py` via GeckoAPI) e consulta
+A **comissão** é escolhida automaticamente por categoria:
+`generate_report.py` lê `ml_domain_id` do CSV (capturado pelo
+`compare_mercadolivre.py` via GeckoAPI) e consulta
 [`config/ml_fees.yaml`](config/ml_fees.yaml) para achar o percentual —
 sem precisar você informar na mão. O arquivo vem com estimativas
 uniformes (12%) para os domínios já testados (pilhas, celulares, fones,
@@ -367,6 +367,20 @@ testando categorias novas e confirmando os valores reais. Passar
 `--commission-pct` explicitamente ignora esse mapa e usa um valor único
 fixo para todas as linhas, como antes.
 
+O **custo fixo** também é escolhido automaticamente, mas por **faixa de
+preço de venda** (o Mercado Livre historicamente não cobra custo fixo
+acima de um certo preço, só a comissão — e cobra valores diferentes
+conforme a faixa abaixo disso): `generate_report.py` consulta
+[`config/ml_fixed_fee_tiers.yaml`](config/ml_fixed_fee_tiers.yaml). Esse
+arquivo vem **vazio de propósito** — não temos como confirmar as faixas
+reais neste ambiente (sem acesso à Amazon nem ao Mercado Livre), e desde
+mar/2026 o valor real depende de peso/dimensão, que este pipeline não
+coleta. Enquanto o YAML estiver vazio, o script usa R$ 6,00 fixo para
+todas as linhas (comportamento anterior) e avisa no console. Preencha as
+faixas com os valores do Simulador de Custos para um cálculo mais
+preciso. Passar `--fixed-fee` explicitamente ignora o YAML e usa um valor
+único fixo para todas as linhas, como antes.
+
 ### Como rodar
 
 ```bash
@@ -374,11 +388,14 @@ pip install -r requirements.txt   # inclui openpyxl e PyYAML
 
 python generate_report.py comparacao.csv
 python generate_report.py comparacao.csv --output oportunidades.xlsx \
-  --fixed-fee 6 --shipping-cost 15 --tax-pct 4 \
+  --shipping-cost 15 --tax-pct 4 \
   --min-margin-pct 15 --min-roi-pct 20
 
 # força uma comissão única para todas as linhas, ignorando config/ml_fees.yaml
 python generate_report.py comparacao.csv --commission-pct 12
+
+# força um custo fixo único para todas as linhas, ignorando config/ml_fixed_fee_tiers.yaml
+python generate_report.py comparacao.csv --fixed-fee 6
 ```
 
 Parâmetros (todos opcionais, com padrão):
@@ -388,7 +405,8 @@ Parâmetros (todos opcionais, com padrão):
 | `--price-basis` | `median` | Qual preço do Mercado Livre usar como venda esperada (`median`/`avg`/`min`) — mediana é mais resistente a outliers que a média |
 | `--commission-pct` | *(automático por categoria)* | Comissão do Mercado Livre em %. Se omitido, escolhe por `ml_domain_id` via `config/ml_fees.yaml`; se informado, vale fixo para todas as linhas |
 | `--fees-config` | `config/ml_fees.yaml` | Caminho do YAML de comissão por categoria |
-| `--fixed-fee` | `6.0` | Custo fixo estimado em R$ por venda |
+| `--fixed-fee` | *(automático por faixa de preço)* | Custo fixo em R$. Se omitido, escolhe pela faixa de preço de venda via `config/ml_fixed_fee_tiers.yaml` (fallback R$ 6,00 se o YAML estiver vazio); se informado, vale fixo para todas as linhas |
+| `--fixed-fee-config` | `config/ml_fixed_fee_tiers.yaml` | Caminho do YAML de custo fixo por faixa de preço |
 | `--shipping-cost` | `0.0` | Frete estimado em R$ que o vendedor absorve — script avisa se ficar em 0 |
 | `--tax-pct` | `0.0` | Imposto sobre a venda em % (depende do seu regime tributário) |
 | `--min-margin-pct` / `--min-roi-pct` | `15.0` / `20.0` | Limiares para classificar como 🟢 excelente oportunidade |

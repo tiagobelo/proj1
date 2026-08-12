@@ -22,6 +22,15 @@ via GeckoAPI) usando o mapa em config/ml_fees.yaml. Passar
 --commission-pct explicitamente ignora esse mapa e usa um valor único
 fixo para todas as linhas, como antes.
 
+Custo fixo automático por faixa de preço: se --fixed-fee não for
+passado, o custo fixo é escolhido pela faixa de preço de venda (o mesmo
+--price-basis usado no lucro) em config/ml_fixed_fee_tiers.yaml. Esse
+YAML vem vazio (sem faixas confirmadas) — enquanto isso, o script usa
+R$ 6,00 fixo para todas as linhas, igual ao comportamento anterior.
+Preencha as faixas com os valores do Simulador de Custos para um cálculo
+mais preciso. Passar --fixed-fee explicitamente ignora o YAML e usa um
+valor único fixo para todas as linhas.
+
 Dependência: openpyxl, PyYAML (pip install openpyxl pyyaml)
 
 Uso:
@@ -43,6 +52,8 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 DEFAULT_FEES_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "ml_fees.yaml"
+DEFAULT_FIXED_FEE_TIERS_PATH = Path(__file__).resolve().parent / "config" / "ml_fixed_fee_tiers.yaml"
+FALLBACK_FIXED_FEE = 6.0
 
 CURRENCY_FORMAT = '"R$" #,##0.00'
 PERCENT_FORMAT = "0.0%"
@@ -83,6 +94,39 @@ COLUMNS = [
 def load_fees_config(path: Path) -> dict:
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def load_fixed_fee_tiers(path: Path) -> list[dict]:
+    """Carrega as faixas de preço -> custo fixo de config/ml_fixed_fee_tiers.yaml.
+
+    O arquivo pode não existir ou vir com `tiers: []` — nesse caso a lista
+    volta vazia e resolve_fixed_fee() cai no valor único FALLBACK_FIXED_FEE.
+    """
+    if not path.exists():
+        return []
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    tiers = data.get("tiers") or []
+    # Ordena por up_to crescente, com up_to: null (sem teto) sempre por
+    # último — assim a primeira faixa que "cobre" o preço de venda é a
+    # correta, sem exigir que o YAML já venha ordenado.
+    return sorted(tiers, key=lambda t: (t.get("up_to") is None, t.get("up_to")))
+
+
+def resolve_fixed_fee(sale_price: float | None, tiers: list[dict], override: float | None) -> float:
+    """Se o usuário passou --fixed-fee, esse valor vale para todas as
+    linhas (comportamento antigo, ignora config/ml_fixed_fee_tiers.yaml).
+    Senão, escolhe pela faixa de preço de venda no YAML. Sem faixas
+    configuradas (arquivo vazio) ou sem preço de venda, usa
+    FALLBACK_FIXED_FEE."""
+    if override is not None:
+        return override
+    if sale_price is not None:
+        for tier in tiers:
+            up_to = tier.get("up_to")
+            if up_to is None or sale_price <= float(up_to):
+                return float(tier["fee"])
+    return FALLBACK_FIXED_FEE
 
 
 def resolve_commission_pct(domain_id: str, fees_config: dict, override: float | None) -> float:
@@ -127,7 +171,8 @@ def calculate_opportunity(
     row: dict,
     basis: str,
     commission_pct: float,
-    fixed_fee: float,
+    fixed_fee_tiers: list[dict],
+    fixed_fee_override: float | None,
     shipping_cost: float,
     tax_pct: float,
     min_margin_pct: float,
@@ -165,6 +210,7 @@ def calculate_opportunity(
     if cost is None or sale_price is None or cost <= 0 or sale_price <= 0:
         return result
 
+    fixed_fee = resolve_fixed_fee(sale_price, fixed_fee_tiers, fixed_fee_override)
     commission = sale_price * commission_pct / 100
     tax = sale_price * tax_pct / 100
     net_profit = sale_price - cost - commission - fixed_fee - shipping_cost - tax
@@ -243,7 +289,8 @@ def main() -> None:
     parser.add_argument("--price-basis", choices=["median", "avg", "min"], default="median", help="Qual preço do Mercado Livre usar como preço de venda esperado (padrão: median, mais resistente a outliers)")
     parser.add_argument("--commission-pct", type=float, default=None, help="Comissão do Mercado Livre em %% fixa para todas as linhas. Se omitido, escolhe automaticamente por categoria (ml_domain_id) usando config/ml_fees.yaml — confirme os valores no Simulador de Custos")
     parser.add_argument("--fees-config", default=str(DEFAULT_FEES_CONFIG_PATH), help="Caminho do YAML de comissão por categoria (padrão: config/ml_fees.yaml)")
-    parser.add_argument("--fixed-fee", type=float, default=6.0, help="Custo fixo estimado em R$ por venda (padrão 6.00 — desde mar/2026 o ML calcula isso por peso/dimensão; confirme no Simulador de Custos)")
+    parser.add_argument("--fixed-fee", type=float, default=None, help="Custo fixo em R$ fixo para TODAS as linhas, ignorando config/ml_fixed_fee_tiers.yaml. Se omitido, escolhe automaticamente pela faixa de preço de venda nesse YAML (fallback R$ 6,00 se o YAML estiver vazio) — desde mar/2026 o ML calcula isso por peso/dimensão; confirme no Simulador de Custos")
+    parser.add_argument("--fixed-fee-config", default=str(DEFAULT_FIXED_FEE_TIERS_PATH), help="Caminho do YAML de custo fixo por faixa de preço (padrão: config/ml_fixed_fee_tiers.yaml)")
     parser.add_argument("--shipping-cost", type=float, default=0.0, help="Frete estimado em R$ que o vendedor absorve (padrão 0 — normalmente é um custo real relevante, ajuste para o seu caso)")
     parser.add_argument("--tax-pct", type=float, default=0.0, help="Imposto sobre a venda em %% (padrão 0 — depende do seu regime tributário, ex.: Simples Nacional)")
     parser.add_argument("--min-margin-pct", type=float, default=15.0, help="Margem mínima (%%) para classificar como 'excelente oportunidade' (padrão 15)")
@@ -254,6 +301,13 @@ def main() -> None:
         print("Aviso: --shipping-cost está em 0. Frete costuma ser um custo real e relevante — considere ajustar.\n")
 
     fees_config = load_fees_config(Path(args.fees_config))
+    fixed_fee_tiers = load_fixed_fee_tiers(Path(args.fixed_fee_config))
+    if args.fixed_fee is None and not fixed_fee_tiers:
+        print(
+            f"Aviso: {args.fixed_fee_config} não tem faixas configuradas (tiers: []) — "
+            f"usando R$ {FALLBACK_FIXED_FEE:.2f} fixo para todas as linhas. Preencha o "
+            "YAML com os valores do Simulador de Custos para um cálculo por faixa de preço.\n"
+        )
 
     with open(args.input_csv, encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
@@ -263,6 +317,7 @@ def main() -> None:
             row,
             args.price_basis,
             resolve_commission_pct(row.get("ml_domain_id", ""), fees_config, args.commission_pct),
+            fixed_fee_tiers,
             args.fixed_fee,
             args.shipping_cost,
             args.tax_pct,
