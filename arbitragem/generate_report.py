@@ -4,7 +4,7 @@ lucro estimado, margem, ROI e uma classificação de oportunidade — a
 partir do CSV produzido por compare_mercadolivre.py.
 
 Não usa banco de dados: o pipeline inteiro roda em cima de arquivos
-CSV/XLSX (scrape_to_csv.py -> compare_mercadolivre.py -> generate_report.py).
+CSV/XLSX (amazon_scrape_to_csv.py -> compare_mercadolivre.py -> generate_report.py).
 
 IMPORTANTE sobre as taxas do Mercado Livre: a partir de mar/2026 o custo
 operacional passou a ser calculado por peso/dimensão do produto em vez de

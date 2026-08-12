@@ -3,26 +3,34 @@
 ## MVP-01 — Amazon Scraper
 
 Primeira entrega do MVP: coletar as páginas **"Mais vendidos"** da Amazon.com.br
-para um conjunto de categorias e gravar os produtos no PostgreSQL. Nenhuma
-integração com o Mercado Livre ou cálculo de arbitragem entra nesta etapa —
-o objetivo é apenas provar que conseguimos coletar dados confiáveis.
+para um conjunto de categorias. Nenhuma integração com o Mercado Livre ou
+cálculo de arbitragem entra nesta etapa — o objetivo é apenas provar que
+conseguimos coletar dados confiáveis.
 
-Há também [`scrape_to_csv.py`](scrape_to_csv.py), uma versão standalone (só
-com Playwright como dependência, sem banco) para validar rapidamente a
-extração antes de configurar o Postgres.
+Há dois jeitos de rodar a coleta, e ambos leem os mesmos departamentos de
+[`config/categories.yaml`](config/categories.yaml):
+
+- [`amazon_scrape_to_csv.py`](amazon_scrape_to_csv.py) — **ponto de entrada
+  do pipeline por arquivo** (o que os MVPs seguintes usam). Sem banco de
+  dados: coleta um ou mais departamentos e grava tudo em um único CSV.
+- [`scraper/amazon_scraper.py`](scraper/amazon_scraper.py) — grava os
+  produtos no PostgreSQL (útil para manter histórico de ranking/preço ao
+  longo do tempo; ver seção "Modelo de dados" abaixo).
 
 ## Campos extraídos
 
-| Campo          | Origem                                                              |
-|----------------|----------------------------------------------------------------------|
-| `asin`         | Extraído da URL do produto (`/dp/{ASIN}`)                           |
-| `title`        | Atributo `alt` da imagem do produto (mais completo que o texto do card) |
-| `rank`         | Badge de posição no ranking (`#1`, `#2`, ...), quando presente        |
-| `price`        | Preço exibido no card (`a-price`/`a-offscreen`)                      |
-| `rating`       | `aria-label` do componente de estrelas (ex.: "4,7 de 5 estrelas")    |
-| `review_count` | Contagem de avaliações ao lado das estrelas                          |
-| `url`          | Link do produto                                                      |
-| `image_url`    | `src` da imagem do produto                                           |
+| Campo            | Origem                                                              |
+|-------------------|----------------------------------------------------------------------|
+| `category_slug`  | Slug do departamento em `config/categories.yaml` (só no CSV multi-departamento) |
+| `category_name`  | Nome do departamento em `config/categories.yaml` (só no CSV multi-departamento) |
+| `asin`           | Extraído da URL do produto (`/dp/{ASIN}`)                           |
+| `title`          | Atributo `alt` da imagem do produto (mais completo que o texto do card) |
+| `rank`           | Badge de posição no ranking (`#1`, `#2`, ...), quando presente        |
+| `price`          | Preço exibido no card (`a-price`/`a-offscreen`)                      |
+| `rating`         | `aria-label` do componente de estrelas (ex.: "4,7 de 5 estrelas")    |
+| `review_count`   | Contagem de avaliações ao lado das estrelas                          |
+| `url`            | Link do produto                                                      |
+| `image_url`      | `src` da imagem do produto                                           |
 
 Campos que a página de "Mais vendidos" **não** expõe de forma confiável
 (marca estruturada, EAN/GTIN, variações) ficam para uma etapa futura —
@@ -46,7 +54,27 @@ com mais frequência entre variações do layout da Amazon.
 
 Ver [`database/schema.sql`](database/schema.sql) para o DDL completo.
 
-## Como rodar
+## Como rodar (sem banco, direto para CSV)
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+
+# Coleta todos os departamentos com active: true em config/categories.yaml
+python amazon_scrape_to_csv.py
+
+# Coleta só departamentos específicos (funciona mesmo se active: false)
+python amazon_scrape_to_csv.py --category eletronicos --category informatica
+
+# URL avulsa, fora de config/categories.yaml
+python amazon_scrape_to_csv.py --url https://www.amazon.com.br/gp/bestsellers/toys/ --output brinquedos.csv
+
+# Mais de uma página por departamento, navegador visível (útil para depurar)
+python amazon_scrape_to_csv.py --pages 2 --headed
+```
+
+## Como rodar (com PostgreSQL, para manter histórico)
 
 ```bash
 cp .env.example .env
@@ -66,14 +94,15 @@ python -m scraper.amazon_scraper --category eletronicos
 python -m scraper.amazon_scraper --dry-run
 ```
 
-Categorias são configuradas em [`config/categories.yaml`](config/categories.yaml) —
-adicionar uma categoria não exige alteração de código. O arquivo já traz os
-28 departamentos de "Mais vendidos" da Amazon.com.br; cada um tem um campo
-`active: true/false` — para tirar um departamento da coleta padrão, basta
-trocar esse valor para `false` (sem editar nenhum script). Departamentos com
-`url: ""` ainda não tiveram a URL real confirmada e por isso já entram como
-`active: false`; confirme a URL no site antes de ativá-los. Uma categoria
-inativa ainda pode ser coletada isoladamente com `--category <slug>`.
+Nos dois casos, os departamentos são configurados em
+[`config/categories.yaml`](config/categories.yaml) — adicionar um não exige
+alteração de código. O arquivo já traz os 28 departamentos de "Mais
+vendidos" da Amazon.com.br; cada um tem um campo `active: true/false` —
+para tirar um departamento da coleta padrão, basta trocar esse valor para
+`false` (sem editar nenhum script). Departamentos com `url: ""` ainda não
+tiveram a URL real confirmada e por isso já entram como `active: false`;
+confirme a URL no site antes de ativá-los. Uma categoria inativa ainda pode
+ser coletada isoladamente com `--category <slug>`.
 
 ## Avisos importantes
 
@@ -90,7 +119,7 @@ inativa ainda pode ser coletada isoladamente com `--category <slug>`.
 ## MVP-02 — Comparação com o Mercado Livre
 
 [`compare_mercadolivre.py`](compare_mercadolivre.py) lê o CSV gerado pelo
-`scrape_to_csv.py`, busca cada produto no Mercado Livre e calcula preço
+`amazon_scrape_to_csv.py`, busca cada produto no Mercado Livre e calcula preço
 mínimo/médio/máximo dos anúncios que provavelmente são o mesmo produto.
 Ainda **não** calcula lucro/ROI — isso é o MVP-03.
 
@@ -269,7 +298,7 @@ comissão, frete ou impostos (isso é o MVP-03).
   escolher a comissão certa automaticamente (ver MVP-03 abaixo), em vez
   de você ter que informar manualmente.
 - **Atalho por EAN**: quando o CSV de entrada (gerado por
-  `scrape_to_csv.py`) tem uma coluna `ean` preenchida e ela bate com o
+  `amazon_scrape_to_csv.py`) tem uma coluna `ean` preenchida e ela bate com o
   `ean` de um anúncio do Mercado Livre, esse anúncio é tratado como o
   mesmo produto com confiança máxima, pulando todos os filtros
   heurísticos. **Limitação atual**: a página de "Mais vendidos" da
@@ -311,7 +340,7 @@ comissão, frete ou impostos (isso é o MVP-03).
 margem, ROI e uma classificação (🟢 excelente / 🟡 moderada / 🔴 não
 recomendada) por produto — a etapa final que transforma os dados brutos
 em decisão de compra. Não usa banco de dados: todo o pipeline roda em
-cima de arquivos (`scrape_to_csv.py` → `compare_mercadolivre.py` →
+cima de arquivos (`amazon_scrape_to_csv.py` → `compare_mercadolivre.py` →
 `generate_report.py`).
 
 ### Sobre as taxas do Mercado Livre

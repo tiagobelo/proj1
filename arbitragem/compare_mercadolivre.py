@@ -1,5 +1,5 @@
 """
-MVP-02: para cada produto de um CSV gerado por scrape_to_csv.py, busca no
+MVP-02: para cada produto de um CSV gerado por amazon_scrape_to_csv.py, busca no
 Mercado Livre via GeckoAPI (serviço de extração de dados de terceiros,
 https://geckoapi.com.br) e calcula preço mínimo/médio/máximo dos anúncios
 compatíveis. Ainda não calcula lucro/ROI (isso é o MVP-03).
@@ -40,7 +40,7 @@ classificação oficial de categoria do Mercado Livire) e `ean` para cada
 anúncio — capturados aqui e exportados no CSV (`ml_category_id`,
 `ml_domain_id`, `ml_ean`) para o generate_report.py escolher a comissão
 certa automaticamente. Quando o CSV de entrada (gerado por
-scrape_to_csv.py) também tiver uma coluna `ean` preenchida, um EAN igual
+amazon_scrape_to_csv.py) também tiver uma coluna `ean` preenchida, um EAN igual
 nos dois lados é tratado como confirmação definitiva de mesmo produto,
 pulando os filtros heurísticos — na prática isso só ativa se a Amazon
 também expuser EAN, o que a página de "Mais vendidos" não faz hoje.
@@ -654,7 +654,7 @@ def compare_product(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compara produtos da Amazon com anúncios no Mercado Livre via GeckoAPI")
-    parser.add_argument("input_csv", help="CSV gerado por scrape_to_csv.py")
+    parser.add_argument("input_csv", help="CSV gerado por amazon_scrape_to_csv.py")
     parser.add_argument("--output", default="comparacao.csv", help="Caminho do CSV de saída")
     parser.add_argument("--min-score", type=float, default=0.5, help="Score mínimo de matching (0 a 1, padrão 0.5)")
     parser.add_argument("--delay", type=float, default=1.0, help="Segundos entre buscas (padrão 1.0)")
