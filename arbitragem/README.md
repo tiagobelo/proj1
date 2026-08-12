@@ -67,7 +67,13 @@ python -m scraper.amazon_scraper --dry-run
 ```
 
 Categorias são configuradas em [`config/categories.yaml`](config/categories.yaml) —
-adicionar uma categoria não exige alteração de código.
+adicionar uma categoria não exige alteração de código. O arquivo já traz os
+28 departamentos de "Mais vendidos" da Amazon.com.br; cada um tem um campo
+`active: true/false` — para tirar um departamento da coleta padrão, basta
+trocar esse valor para `false` (sem editar nenhum script). Departamentos com
+`url: ""` ainda não tiveram a URL real confirmada e por isso já entram como
+`active: false`; confirme a URL no site antes de ativá-los. Uma categoria
+inativa ainda pode ser coletada isoladamente com `--category <slug>`.
 
 ## Avisos importantes
 

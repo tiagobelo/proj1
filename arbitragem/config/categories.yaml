@@ -1,22 +1,168 @@
 # Páginas "Mais vendidos" da Amazon.com.br que serão coletadas pelo scraper.
-# Adicione/remova categorias aqui; nenhuma mudança de código é necessária.
+#
+# Cada categoria tem:
+#   slug:   identificador interno (usado em --category e salvo no banco)
+#   name:   nome de exibição
+#   url:    URL da página "Mais vendidos" do departamento
+#   active: true/false — controla se `python -m scraper.amazon_scraper`
+#           (sem --category) inclui essa categoria na coleta.
+#
+# Para "inativar" uma categoria, basta trocar seu `active` para `false`
+# aqui — nenhuma mudança de código é necessária. Uma categoria inativa
+# ainda pode ser coletada isoladamente com `--category <slug>`.
+#
+# Categorias com `active: false` e `url: ""` são departamentos que a
+# Amazon.com.br lista em "Mais vendidos" (menu "Qualquer departamento")
+# mas cuja URL real ainda não foi confirmada — os slugs de URL da Amazon
+# não seguem um padrão previsível a partir do nome em português (ex.:
+# "Ferramentas" usa /hi/, não /tools/), então é preciso abrir cada link
+# no site e copiar a URL antes de ativar. Ao confirmar, preencha `url` e
+# troque `active` para `true`.
+
 categories:
+  # --- Verificadas (URL confirmada, coleta ativa) ---
   - slug: eletronicos
     name: Eletrônicos
     url: https://www.amazon.com.br/gp/bestsellers/electronics/
+    active: true
 
   - slug: informatica
-    name: Informática
+    name: Computadores e Informática
     url: https://www.amazon.com.br/gp/bestsellers/computers/
+    active: true
 
   - slug: casa
     name: Casa
     url: https://www.amazon.com.br/gp/bestsellers/home/
+    active: true
 
   - slug: ferramentas
-    name: Ferramentas
+    name: Ferramentas e Materiais de Construção
     url: https://www.amazon.com.br/gp/bestsellers/hi/
+    active: true
 
   - slug: acessorios-celular
     name: Acessórios para celular
     url: https://www.amazon.com.br/gp/bestsellers/wireless/
+    active: true
+
+  # --- Pendentes de verificação (confirme a URL antes de ativar) ---
+  - slug: alimentos-bebidas
+    name: Alimentos e Bebidas
+    url: ""
+    active: false
+
+  - slug: apps-jogos
+    name: Apps e Jogos
+    url: ""
+    active: false
+
+  - slug: automotivo
+    name: Automotivo
+    url: ""
+    active: false
+
+  - slug: bebes
+    name: Bebês
+    url: ""
+    active: false
+
+  - slug: beleza
+    name: Beleza
+    url: ""
+    active: false
+
+  - slug: beleza-premium
+    name: Beleza Premium
+    url: ""
+    active: false
+
+  - slug: brinquedos-jogos
+    name: Brinquedos e Jogos
+    url: ""
+    active: false
+
+  - slug: cd-vinil
+    name: CD e Vinil
+    url: ""
+    active: false
+
+  - slug: cozinha
+    name: Cozinha
+    url: ""
+    active: false
+
+  - slug: dispositivos-amazon
+    name: Dispositivos Amazon e Acessórios
+    url: ""
+    active: false
+
+  - slug: dvd-bluray
+    name: DVD e Blu-ray
+    url: ""
+    active: false
+
+  - slug: eletrodomesticos
+    name: Eletrodomésticos
+    url: ""
+    active: false
+
+  - slug: esporte
+    name: Esporte
+    url: ""
+    active: false
+
+  - slug: games-consoles
+    name: Games e Consoles
+    url: ""
+    active: false
+
+  - slug: gift-cards
+    name: Gift Cards
+    url: ""
+    active: false
+
+  - slug: instrumentos-musicais
+    name: Instrumentos Musicais
+    url: ""
+    active: false
+
+  - slug: jardim-piscina
+    name: Jardim e Piscina
+    url: ""
+    active: false
+
+  - slug: livros
+    name: Livros
+    url: ""
+    active: false
+
+  - slug: loja-kindle
+    name: Loja Kindle
+    url: ""
+    active: false
+
+  - slug: moda
+    name: Moda
+    url: ""
+    active: false
+
+  - slug: moveis
+    name: Móveis
+    url: ""
+    active: false
+
+  - slug: papelaria-escritorio
+    name: Papelaria e Escritório
+    url: ""
+    active: false
+
+  - slug: pet-shop
+    name: Pet Shop
+    url: ""
+    active: false
+
+  - slug: saude-bem-estar
+    name: Saúde e Bem-Estar
+    url: ""
+    active: false

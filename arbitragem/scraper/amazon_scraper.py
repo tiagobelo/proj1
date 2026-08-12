@@ -27,7 +27,7 @@ import time
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
-from scraper.config import Category, Settings, load_categories, load_settings
+from scraper.config import Category, Settings, ensure_scrapeable, load_categories, load_settings
 from scraper.db import get_connection, get_or_create_category, upsert_product
 from scraper.models import ScrapedProduct
 
@@ -212,11 +212,23 @@ def scrape_category(page: Page, category: Category, settings: Settings) -> list[
 
 def run(category_slugs: list[str] | None = None, dry_run: bool = False) -> None:
     settings = load_settings()
-    categories = load_categories()
+    all_categories = load_categories(include_inactive=True)
+
     if category_slugs:
-        categories = [c for c in categories if c.slug in category_slugs]
+        # Seleção explícita via --category funciona mesmo para categorias
+        # com active: false no YAML, para permitir testar uma categoria
+        # nova antes de ativá-la de vez.
+        categories = [c for c in all_categories if c.slug in category_slugs]
+        missing = set(category_slugs) - {c.slug for c in categories}
+        if missing:
+            raise SystemExit(f"Categoria(s) não encontrada(s) em categories.yaml: {', '.join(sorted(missing))}")
+    else:
+        categories = [c for c in all_categories if c.active]
         if not categories:
-            raise SystemExit(f"Nenhuma categoria encontrada para {category_slugs}")
+            raise SystemExit("Nenhuma categoria com active: true em config/categories.yaml.")
+
+    for category in categories:
+        ensure_scrapeable(category)
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=settings.headless)
@@ -253,7 +265,11 @@ def main() -> None:
         "--category",
         dest="categories",
         action="append",
-        help="Slug de categoria a coletar (repita para várias). Padrão: todas em categories.yaml",
+        help=(
+            "Slug de categoria a coletar (repita para várias). Funciona mesmo se a "
+            "categoria estiver com active: false. Padrão: todas as categorias com "
+            "active: true em categories.yaml"
+        ),
     )
     parser.add_argument(
         "--dry-run",
